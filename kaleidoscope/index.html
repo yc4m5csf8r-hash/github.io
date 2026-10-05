@@ -133,6 +133,8 @@
   <div class="actions">
     <button class="btn" id="freezeBtn" aria-pressed="false">停止 <kbd>Space</kbd></button>
     <button class="btn" id="randomBtn">ランダム <kbd>R</kbd></button>
+    <button class="btn" id="gemBtn" aria-pressed="true">宝石 <kbd>G</kbd></button>
+    <button class="btn" id="tiltBtn" hidden>傾きを使う</button>
     <button class="btn" id="saveBtn">画像保存 <kbd>S</kbd></button>
     <button class="btn" id="clearBtn">消去 <kbd>C</kbd></button>
     <button class="btn" id="hideBtn" title="操作パネルを隠す (H)">隠す</button>
@@ -157,6 +159,8 @@
   const ctx = canvas.getContext('2d');
   const src = document.createElement('canvas');   // one mirror wedge lives here
   const sctx = src.getContext('2d');
+  const comp = document.createElement('canvas');  // wedge = trails + gems, rebuilt each frame
+  const cctx = comp.getContext('2d');
 
   const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 
@@ -187,6 +191,7 @@
     hueBase: 200,
     rotSpeed: reduceMotion ? 0 : 0.06,   // radians / second
     width: 3,
+    gems: true,
   };
   let angle = 0, time = 0, last = performance.now();
   let W = 0, H = 0, dpr = 1, R = 0;
@@ -211,7 +216,159 @@
     sctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     sctx.lineCap = sctx.lineJoin = 'round';
     if (keep.width) sctx.drawImage(keep, 0, 0, keep.width / dpr, keep.height / dpr);
+    comp.width = comp.height = src.width;
+    cctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    if (!gems.length) seedGems();
+    composeWedge();
     render();
+  }
+
+  // ---- gems: beads and sequins tumbling in the object chamber ---------------
+  const GEM_COUNT = 46;
+  const SHAPES = ['bead', 'bead', 'diamond', 'star', 'sequin', 'shard'];
+  let gems = [];
+  const gravity = { x: 0, y: 0, fromSensor: false, lastSensor: -1e9 };
+
+  function chamberRadius() { return Math.min(W, H) * 0.47; }
+  function seedGems() {
+    const rc = chamberRadius();
+    gems = Array.from({ length: GEM_COUNT }, () => {
+      const a = Math.random() * Math.PI * 2, d = Math.sqrt(Math.random()) * rc * 0.9;
+      const size = 3.5 + Math.pow(Math.random(), 1.8) * 11;
+      return {
+        x: Math.cos(a) * d, y: Math.sin(a) * d, vx: 0, vy: 0,
+        size, shape: SHAPES[Math.floor(Math.random() * SHAPES.length)],
+        rot: Math.random() * 6.28, seed: Math.random() * 600,
+        grip: 0.55 + Math.random() * 0.45,          // heavier pieces slide sooner
+        tw: Math.random() * 6.28, twSpeed: 1.5 + Math.random() * 3,
+      };
+    });
+  }
+
+  function stepGems(dt, now) {
+    if (now - gravity.lastSensor > 1500) {
+      // no tilt sensor: let the chamber turn slowly by itself
+      gravity.fromSensor = false;
+      const a = time * 0.35;
+      gravity.x = Math.cos(a) * 0.55; gravity.y = Math.sin(a) * 0.55;
+    }
+    const rc = chamberRadius(), g = 900;
+    for (const p of gems) {
+      p.vx += gravity.x * g * p.grip * dt;
+      p.vy += gravity.y * g * p.grip * dt;
+      const damp = Math.pow(0.25, dt);
+      p.vx *= damp; p.vy *= damp;
+      p.x += p.vx * dt; p.y += p.vy * dt;
+      p.rot += (p.vx * -p.y + p.vy * p.x) / (rc * rc) * 4 * dt + p.vx * 0.004 * dt;
+      // round chamber wall
+      const d = Math.hypot(p.x, p.y), lim = rc - p.size;
+      if (d > lim) {
+        const nx = p.x / d, ny = p.y / d;
+        p.x = nx * lim; p.y = ny * lim;
+        const vn = p.vx * nx + p.vy * ny;
+        if (vn > 0) { p.vx -= 1.4 * vn * nx; p.vy -= 1.4 * vn * ny; }
+      }
+    }
+    // gentle push-apart so pieces pile up instead of merging
+    for (let i = 0; i < gems.length; i++) {
+      const a = gems[i];
+      for (let j = i + 1; j < gems.length; j++) {
+        const b = gems[j];
+        const dx = b.x - a.x, dy = b.y - a.y, min = (a.size + b.size) * 0.8;
+        const d2 = dx * dx + dy * dy;
+        if (d2 > 0.01 && d2 < min * min) {
+          const d = Math.sqrt(d2), push = (min - d) * 0.5, ux = dx / d, uy = dy / d;
+          a.x -= ux * push; a.y -= uy * push; b.x += ux * push; b.y += uy * push;
+        }
+      }
+    }
+  }
+
+  function gemPath(c, shape, s) {
+    c.beginPath();
+    if (shape === 'bead') {
+      c.arc(0, 0, s, 0, Math.PI * 2);
+    } else if (shape === 'diamond') {
+      c.moveTo(0, -s * 1.3); c.lineTo(s * 0.8, 0); c.lineTo(0, s * 1.3); c.lineTo(-s * 0.8, 0); c.closePath();
+    } else if (shape === 'star') {
+      for (let k = 0; k < 10; k++) {
+        const r = k % 2 ? s * 0.45 : s * 1.2, a = k * Math.PI / 5 - Math.PI / 2;
+        k ? c.lineTo(r * Math.cos(a), r * Math.sin(a)) : c.moveTo(r * Math.cos(a), r * Math.sin(a));
+      }
+      c.closePath();
+    } else if (shape === 'sequin') {
+      c.arc(0, 0, s, 0, Math.PI * 2); c.arc(0, 0, s * 0.42, 0, Math.PI * 2, true);
+    } else {
+      c.moveTo(-s, s * 0.7); c.lineTo(s * 1.1, s * 0.4); c.lineTo(-s * 0.2, -s * 1.1); c.closePath();
+    }
+  }
+
+  function drawGems(c) {
+    const cx = W / 2, cy = H / 2;
+    for (const p of gems) {
+      const f = fold(cx + p.x, cy + p.y);
+      const col = colorAt(p.seed);
+      const s = p.size;
+      c.save();
+      c.translate(f.x, f.y);
+      c.rotate(p.rot);
+      // body
+      c.globalCompositeOperation = 'source-over';
+      c.globalAlpha = 0.9;
+      c.fillStyle = col;
+      c.shadowColor = col; c.shadowBlur = 8 * dpr;
+      gemPath(c, p.shape, s);
+      c.fill('evenodd');
+      c.shadowBlur = 0;
+      // facet highlight
+      c.globalAlpha = 0.75;
+      const hl = c.createRadialGradient(-s * 0.35, -s * 0.4, 0, -s * 0.35, -s * 0.4, s * 0.9);
+      hl.addColorStop(0, 'rgba(255,255,255,0.95)');
+      hl.addColorStop(1, 'rgba(255,255,255,0)');
+      c.fillStyle = hl;
+      gemPath(c, p.shape, s);
+      c.fill('evenodd');
+      // twinkle flare
+      const tw = Math.pow(Math.max(0, Math.sin(time * p.twSpeed + p.tw)), 10);
+      if (tw > 0.05) {
+        c.rotate(-p.rot);
+        c.globalAlpha = tw;
+        c.globalCompositeOperation = 'lighter';
+        c.strokeStyle = '#fff'; c.lineWidth = 1.2; c.lineCap = 'round';
+        const L = s * 2.6;
+        c.beginPath();
+        c.moveTo(-L, 0); c.lineTo(L, 0); c.moveTo(0, -L); c.lineTo(0, L);
+        c.stroke();
+      }
+      c.restore();
+    }
+    c.globalAlpha = 1;
+    c.globalCompositeOperation = 'source-over';
+  }
+
+  function composeWedge() {
+    cctx.setTransform(1, 0, 0, 1, 0, 0);
+    cctx.clearRect(0, 0, comp.width, comp.height);
+    cctx.drawImage(src, 0, 0);
+    cctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    if (state.gems) drawGems(cctx);
+  }
+
+  // ---- tilt sensor -------------------------------------------------------
+  function onOrient(e) {
+    if (e.beta == null || e.gamma == null) return;
+    const rad = Math.PI / 180;
+    let gx = Math.sin(e.gamma * rad), gy = Math.sin(e.beta * rad);
+    // match the screen's current rotation
+    const so = (screen.orientation && screen.orientation.angle) || window.orientation || 0;
+    const a = -so * rad;
+    const rx = gx * Math.cos(a) - gy * Math.sin(a), ry = gx * Math.sin(a) + gy * Math.cos(a);
+    gravity.x += (rx - gravity.x) * 0.3; gravity.y += (ry - gravity.y) * 0.3;
+    gravity.fromSensor = true;
+    gravity.lastSensor = performance.now();
+  }
+  function startTilt() {
+    window.addEventListener('deviceorientation', onOrient);
   }
 
   // Map a screen point into the wedge (polar fold: continuous triangle wave on the angle)
@@ -315,7 +472,7 @@
         ctx.arc(0, 0, R, 0, h);
         ctx.closePath();
         ctx.clip();
-        ctx.drawImage(src, 0, 0, R, R);
+        ctx.drawImage(comp, 0, 0, R, R);
         ctx.restore();
       }
     }
@@ -361,6 +518,8 @@
     } else {
       brush.ready = false;
     }
+    if (state.gems) stepGems(dt, now);
+    composeWedge();
     render();
   }
 
@@ -399,7 +558,7 @@
   function setSegments(n) {
     state.segments = Math.max(2, Math.min(24, n));
     segInput.value = state.segments; segVal.textContent = state.segments;
-    if (state.frozen) render();
+    if (state.frozen) { composeWedge(); render(); }
   }
   function setTrail(v) { state.trail = v; trailInput.value = v; }
   function setFrozen(f) {
@@ -413,6 +572,7 @@
     sctx.setTransform(1, 0, 0, 1, 0, 0);
     sctx.clearRect(0, 0, src.width, src.height);
     sctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    composeWedge();
     render();
   }
   function randomize() {
@@ -424,6 +584,7 @@
     state.rotSpeed = reduceMotion ? 0 : r(-0.25, 0.25);
     auto = { a: r(1, 3.2), b: r(1, 3.2), phase: r(0, 6.28), amp: r(0.2, 0.44) };
     if (state.trail >= 100) setTrail(70);
+    seedGems();
     clearAll();
     ptr.lastMove = -1e9; brush.ready = false;    // let the guide paint a fresh preview
     if (state.frozen) setFrozen(false);
@@ -449,6 +610,32 @@
   trailInput.addEventListener('input', () => setTrail(+trailInput.value));
   $('freezeBtn').addEventListener('click', () => setFrozen(!state.frozen));
   $('randomBtn').addEventListener('click', randomize);
+  function toggleGems() {
+    state.gems = !state.gems;
+    $('gemBtn').setAttribute('aria-pressed', state.gems);
+    composeWedge(); render();
+  }
+  $('gemBtn').addEventListener('click', toggleGems);
+
+  // iPhone/iPad ask for permission from a tap; other phones just start sending tilt
+  const DOE = window.DeviceOrientationEvent;
+  if (DOE && typeof DOE.requestPermission === 'function') {
+    $('tiltBtn').hidden = false;
+    $('tiltBtn').addEventListener('click', async () => {
+      try {
+        if (await DOE.requestPermission() === 'granted') {
+          startTilt();
+          $('tiltBtn').hidden = true;
+        } else {
+          $('tiltBtn').textContent = '傾きは許可されませんでした';
+        }
+      } catch (err) {
+        $('tiltBtn').textContent = 'この画面では傾きを使えません';
+      }
+    });
+  } else if (DOE) {
+    startTilt();
+  }
   $('saveBtn').addEventListener('click', exportImage);
   $('clearBtn').addEventListener('click', clearAll);
   $('hideBtn').addEventListener('click', toggleUI);
@@ -481,6 +668,7 @@
       case 's': exportImage(); break;
       case 'c': clearAll(); break;
       case 'h': toggleUI(); break;
+      case 'g': toggleGems(); break;
       case 'arrowup': case 'arrowright': setSegments(state.segments + 1); break;
       case 'arrowdown': case 'arrowleft': setSegments(state.segments - 1); break;
       default: {
