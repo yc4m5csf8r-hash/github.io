@@ -130,10 +130,14 @@
     <label class="label" for="trail">残像</label>
     <input id="trail" type="range" min="0" max="100" step="1" value="70">
   </div>
+  <div class="group">
+    <label class="label" for="gemCount">宝石</label>
+    <input id="gemCount" type="range" min="0" max="120" step="2" value="40">
+    <span class="num" id="gemVal">40</span>
+  </div>
   <div class="actions">
     <button class="btn" id="freezeBtn" aria-pressed="false">停止 <kbd>Space</kbd></button>
     <button class="btn" id="randomBtn">ランダム <kbd>R</kbd></button>
-    <button class="btn" id="gemBtn" aria-pressed="true">宝石 <kbd>G</kbd></button>
     <button class="btn" id="tiltBtn" hidden>傾きを使う</button>
     <button class="btn" id="saveBtn">画像保存 <kbd>S</kbd></button>
     <button class="btn" id="clearBtn">消去 <kbd>C</kbd></button>
@@ -191,7 +195,7 @@
     hueBase: 200,
     rotSpeed: reduceMotion ? 0 : 0.06,   // radians / second
     width: 3,
-    gems: true,
+    gemCount: 40,
   };
   let angle = 0, time = 0, last = performance.now();
   let W = 0, H = 0, dpr = 1, R = 0;
@@ -218,66 +222,77 @@
     if (keep.width) sctx.drawImage(keep, 0, 0, keep.width / dpr, keep.height / dpr);
     comp.width = comp.height = src.width;
     cctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    if (!gems.length) seedGems();
+    if (!gemsSeeded) { seedGems(); gemsSeeded = true; }
     composeWedge();
     render();
   }
 
-  // ---- gems: beads and sequins tumbling in the object chamber ---------------
-  const GEM_COUNT = 46;
+  // ---- gems: beads and sequins floating in the object chamber ------------
   const SHAPES = ['bead', 'bead', 'diamond', 'star', 'sequin', 'shard'];
-  let gems = [];
+  let gems = [], gemsSeeded = false;
   const gravity = { x: 0, y: 0, fromSensor: false, lastSensor: -1e9 };
 
   function chamberRadius() { return Math.min(W, H) * 0.47; }
-  function seedGems() {
+  function makeGem() {
     const rc = chamberRadius();
-    gems = Array.from({ length: GEM_COUNT }, () => {
-      const a = Math.random() * Math.PI * 2, d = Math.sqrt(Math.random()) * rc * 0.9;
-      const size = 3.5 + Math.pow(Math.random(), 1.8) * 11;
-      return {
-        x: Math.cos(a) * d, y: Math.sin(a) * d, vx: 0, vy: 0,
-        size, shape: SHAPES[Math.floor(Math.random() * SHAPES.length)],
-        rot: Math.random() * 6.28, seed: Math.random() * 600,
-        grip: 0.55 + Math.random() * 0.45,          // heavier pieces slide sooner
-        tw: Math.random() * 6.28, twSpeed: 1.5 + Math.random() * 3,
-      };
-    });
+    const a = Math.random() * Math.PI * 2, d = Math.sqrt(Math.random()) * rc * 0.95;
+    return {
+      x: Math.cos(a) * d, y: Math.sin(a) * d, vx: 0, vy: 0,
+      size: 3.5 + Math.pow(Math.random(), 1.8) * 11,
+      shape: SHAPES[Math.floor(Math.random() * SHAPES.length)],
+      rot: Math.random() * 6.28, spin: (Math.random() - 0.5) * 0.8,
+      seed: Math.random() * 600,
+      drift: 0.6 + Math.random() * 0.7,           // how strongly the current carries it
+      wp: Math.random() * 6.28, wq: Math.random() * 6.28, ws: 0.25 + Math.random() * 0.5,
+      tw: Math.random() * 6.28, twSpeed: 1.5 + Math.random() * 3,
+    };
+  }
+  function seedGems() { gems = Array.from({ length: state.gemCount }, makeGem); }
+  function setGemCount(n) {
+    state.gemCount = n;
+    $('gemCount').value = n; $('gemVal').textContent = n;
+    while (gems.length < n) gems.push(makeGem());
+    if (gems.length > n) gems.length = n;
+    if (state.frozen) { composeWedge(); render(); }
   }
 
   function stepGems(dt, now) {
     if (now - gravity.lastSensor > 1500) {
-      // no tilt sensor: let the chamber turn slowly by itself
+      // no tilt sensor: a slow current that turns by itself
       gravity.fromSensor = false;
-      const a = time * 0.35;
-      gravity.x = Math.cos(a) * 0.55; gravity.y = Math.sin(a) * 0.55;
+      const a = time * 0.25;
+      gravity.x = Math.cos(a) * 0.35; gravity.y = Math.sin(a) * 0.35;
     }
-    const rc = chamberRadius(), g = 900;
+    const rc = chamberRadius();
+    const current = 85;                      // px/s at full tilt
+    const ease = 1 - Math.pow(0.35, dt);     // slow response = floaty inertia
     for (const p of gems) {
-      p.vx += gravity.x * g * p.grip * dt;
-      p.vy += gravity.y * g * p.grip * dt;
-      const damp = Math.pow(0.25, dt);
-      p.vx *= damp; p.vy *= damp;
+      // each piece wanders on its own, like something suspended in water
+      const wx = Math.sin(time * p.ws + p.wp) * 22 + Math.sin(time * p.ws * 2.3 + p.wq) * 9;
+      const wy = Math.cos(time * p.ws * 0.9 + p.wq) * 22 + Math.sin(time * p.ws * 1.7 + p.wp) * 9;
+      const tvx = gravity.x * current * p.drift + wx;
+      const tvy = gravity.y * current * p.drift + wy;
+      p.vx += (tvx - p.vx) * ease;
+      p.vy += (tvy - p.vy) * ease;
       p.x += p.vx * dt; p.y += p.vy * dt;
-      p.rot += (p.vx * -p.y + p.vy * p.x) / (rc * rc) * 4 * dt + p.vx * 0.004 * dt;
-      // round chamber wall
-      const d = Math.hypot(p.x, p.y), lim = rc - p.size;
-      if (d > lim) {
-        const nx = p.x / d, ny = p.y / d;
-        p.x = nx * lim; p.y = ny * lim;
-        const vn = p.vx * nx + p.vy * ny;
-        if (vn > 0) { p.vx -= 1.4 * vn * nx; p.vy -= 1.4 * vn * ny; }
+      p.rot += (p.spin + p.vx * 0.004) * dt;
+      // drifting out of the chamber: come back in from the opposite side
+      const d = Math.hypot(p.x, p.y);
+      if (d > rc) {
+        const k = (rc * 0.98) / d;
+        p.x = -p.x * k; p.y = -p.y * k;
       }
+      p.fade = Math.min(1, Math.max(0, (rc - d) / (rc * 0.2)));
     }
-    // gentle push-apart so pieces pile up instead of merging
+    // soft spacing so pieces don't clump
     for (let i = 0; i < gems.length; i++) {
       const a = gems[i];
       for (let j = i + 1; j < gems.length; j++) {
         const b = gems[j];
-        const dx = b.x - a.x, dy = b.y - a.y, min = (a.size + b.size) * 0.8;
+        const dx = b.x - a.x, dy = b.y - a.y, min = (a.size + b.size) * 0.9;
         const d2 = dx * dx + dy * dy;
         if (d2 > 0.01 && d2 < min * min) {
-          const d = Math.sqrt(d2), push = (min - d) * 0.5, ux = dx / d, uy = dy / d;
+          const d = Math.sqrt(d2), push = (min - d) * 0.15, ux = dx / d, uy = dy / d;
           a.x -= ux * push; a.y -= uy * push; b.x += ux * push; b.y += uy * push;
         }
       }
@@ -308,20 +323,21 @@
     for (const p of gems) {
       const f = fold(cx + p.x, cy + p.y);
       const col = colorAt(p.seed);
-      const s = p.size;
+      const s = p.size, fade = p.fade ?? 1;
+      if (fade <= 0) continue;
       c.save();
       c.translate(f.x, f.y);
       c.rotate(p.rot);
       // body
       c.globalCompositeOperation = 'source-over';
-      c.globalAlpha = 0.9;
+      c.globalAlpha = 0.9 * fade;
       c.fillStyle = col;
       c.shadowColor = col; c.shadowBlur = 8 * dpr;
       gemPath(c, p.shape, s);
       c.fill('evenodd');
       c.shadowBlur = 0;
       // facet highlight
-      c.globalAlpha = 0.75;
+      c.globalAlpha = 0.75 * fade;
       const hl = c.createRadialGradient(-s * 0.35, -s * 0.4, 0, -s * 0.35, -s * 0.4, s * 0.9);
       hl.addColorStop(0, 'rgba(255,255,255,0.95)');
       hl.addColorStop(1, 'rgba(255,255,255,0)');
@@ -332,7 +348,7 @@
       const tw = Math.pow(Math.max(0, Math.sin(time * p.twSpeed + p.tw)), 10);
       if (tw > 0.05) {
         c.rotate(-p.rot);
-        c.globalAlpha = tw;
+        c.globalAlpha = tw * fade;
         c.globalCompositeOperation = 'lighter';
         c.strokeStyle = '#fff'; c.lineWidth = 1.2; c.lineCap = 'round';
         const L = s * 2.6;
@@ -351,7 +367,7 @@
     cctx.clearRect(0, 0, comp.width, comp.height);
     cctx.drawImage(src, 0, 0);
     cctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    if (state.gems) drawGems(cctx);
+    if (gems.length) drawGems(cctx);
   }
 
   // ---- tilt sensor -------------------------------------------------------
@@ -518,7 +534,7 @@
     } else {
       brush.ready = false;
     }
-    if (state.gems) stepGems(dt, now);
+    if (gems.length) stepGems(dt, now);
     composeWedge();
     render();
   }
@@ -610,12 +626,7 @@
   trailInput.addEventListener('input', () => setTrail(+trailInput.value));
   $('freezeBtn').addEventListener('click', () => setFrozen(!state.frozen));
   $('randomBtn').addEventListener('click', randomize);
-  function toggleGems() {
-    state.gems = !state.gems;
-    $('gemBtn').setAttribute('aria-pressed', state.gems);
-    composeWedge(); render();
-  }
-  $('gemBtn').addEventListener('click', toggleGems);
+  $('gemCount').addEventListener('input', () => setGemCount(+$('gemCount').value));
 
   // iPhone/iPad ask for permission from a tap; other phones just start sending tilt
   const DOE = window.DeviceOrientationEvent;
@@ -668,7 +679,6 @@
       case 's': exportImage(); break;
       case 'c': clearAll(); break;
       case 'h': toggleUI(); break;
-      case 'g': toggleGems(); break;
       case 'arrowup': case 'arrowright': setSegments(state.segments + 1); break;
       case 'arrowdown': case 'arrowleft': setSegments(state.segments - 1); break;
       default: {
