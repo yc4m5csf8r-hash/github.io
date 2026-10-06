@@ -1,0 +1,699 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>万華鏡キャンバス</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Shippori+Mincho:wght@600&family=Zen+Kaku+Gothic+New:wght@400;500;700&display=swap">
+<style>
+  /* Layout: full-bleed canvas; one floating glass control dock at the bottom, title whisper at top-left.
+     Single dark look by choice — light glows need a night-sky ground. */
+  :root {
+    --ink: #07060d;          /* canvas ground */
+    --glass: rgba(20, 18, 34, 0.72);
+    --line: rgba(220, 210, 255, 0.14);
+    --text: #ece8f7;
+    --muted: #9c95b8;
+    --accent: #f2c66d;       /* brass, like the tube of a toy kaleidoscope */
+    --font-display: "Shippori Mincho", "Hiragino Mincho ProN", "Yu Mincho", serif;
+    --font-ui: "Zen Kaku Gothic New", "Hiragino Sans", "Yu Gothic", system-ui, sans-serif;
+    color-scheme: dark;
+  }
+  [hidden] { display: none !important; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; overflow: hidden;
+    background: var(--ink); color: var(--text);
+    font: 14px/1.4 var(--font-ui);
+    -webkit-tap-highlight-color: transparent;
+  }
+  canvas#scope { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: crosshair; }
+
+  .brand {
+    position: fixed; left: 16px; top: calc(14px + env(safe-area-inset-top, 0px));
+    pointer-events: none; display: grid; gap: 2px;
+    transition: opacity .4s;
+  }
+  .brand h1 { margin: 0; font: 600 22px/1.1 var(--font-display); letter-spacing: .12em; }
+  .brand p { margin: 0; color: var(--muted); font-size: 12px; letter-spacing: .04em; }
+  .badge {
+    position: fixed; right: 16px; top: calc(16px + env(safe-area-inset-top, 0px));
+    padding: 4px 10px; border-radius: 999px; border: 1px solid var(--accent);
+    color: var(--accent); font-size: 12px; letter-spacing: .1em; background: var(--glass);
+  }
+
+  .dock {
+    position: fixed; left: 50%; transform: translateX(-50%);
+    bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+    width: min(860px, calc(100% - 32px));
+    display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px;
+    padding: 10px 14px; border-radius: 16px;
+    background: var(--glass); border: 1px solid var(--line);
+    backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+    transition: opacity .3s, transform .3s;
+  }
+  .dock.hidden { opacity: 0; pointer-events: none; transform: translate(-50%, 12px); }
+  .group { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .label { color: var(--muted); font-size: 12px; letter-spacing: .06em; white-space: nowrap; }
+  .num { font-variant-numeric: tabular-nums; min-width: 2ch; text-align: right; font-weight: 700; color: var(--accent); }
+  input[type=range] { width: 110px; accent-color: var(--accent); }
+
+  .swatches { display: flex; gap: 6px; }
+  .sw {
+    width: 24px; height: 24px; border-radius: 50%; padding: 0; cursor: pointer;
+    border: 2px solid transparent; outline-offset: 2px;
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,.18);
+  }
+  .sw[aria-pressed="true"] { border-color: var(--text); }
+
+  .actions { display: flex; gap: 6px; margin-left: auto; flex-wrap: wrap; }
+  .btn {
+    font: 500 13px/1 var(--font-ui); color: var(--text); cursor: pointer;
+    background: rgba(255,255,255,.06); border: 1px solid var(--line);
+    padding: 8px 11px; border-radius: 10px; display: inline-flex; align-items: center; gap: 6px; text-decoration: none;
+  }
+  .btn:hover { background: rgba(255,255,255,.12); }
+  .btn[aria-pressed="true"] { background: var(--accent); color: var(--ink); border-color: var(--accent); }
+  .btn kbd { font: 11px/1 var(--font-ui); opacity: .55; }
+  .btn[aria-pressed="true"] kbd { opacity: .7; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .toggle-ui {
+    position: fixed; right: 16px; bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+    display: none;
+  }
+  .dock.hidden ~ .toggle-ui { display: inline-flex; }
+
+  .overlay {
+    position: fixed; inset: 0; display: grid; place-items: center; padding: 16px;
+    background: rgba(4, 3, 8, .78); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+  }
+  .sheet {
+    display: grid; gap: 12px; justify-items: center; max-width: min(560px, 100%);
+    background: var(--glass); border: 1px solid var(--line); border-radius: 16px; padding: 16px;
+  }
+  .sheet img { max-width: 100%; max-height: 60vh; border-radius: 10px; display: block; }
+  .sheet p { margin: 0; color: var(--muted); font-size: 13px; text-align: center; }
+  .sheet .row { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+
+  @media (max-width: 520px) {
+    .dock { gap: 10px 12px; padding: 10px; }
+    input[type=range] { width: 90px; }
+    .btn kbd { display: none; }
+    .actions { margin-left: 0; }
+    .brand p { display: none; }
+  }
+</style>
+</head>
+<body>
+<canvas id="scope" aria-label="万華鏡。ポインターを動かすと模様が描かれます"></canvas>
+
+<div class="brand" id="brand">
+  <h1>万華鏡</h1>
+  <p>画面をなぞると、動きが鏡に映って模様になります</p>
+</div>
+<div class="badge" id="frozenBadge" hidden>停止中</div>
+
+<div class="dock" id="dock">
+  <div class="group">
+    <label class="label" for="segments">鏡の数</label>
+    <input id="segments" type="range" min="2" max="24" step="1" value="8">
+    <span class="num" id="segVal">8</span>
+  </div>
+  <div class="group">
+    <span class="label">色</span>
+    <div class="swatches" id="swatches" role="group" aria-label="カラーモード"></div>
+  </div>
+  <div class="group">
+    <label class="label" for="trail">残像</label>
+    <input id="trail" type="range" min="0" max="100" step="1" value="70">
+  </div>
+  <div class="group">
+    <label class="label" for="gemCount">宝石</label>
+    <input id="gemCount" type="range" min="0" max="120" step="2" value="40">
+    <span class="num" id="gemVal">40</span>
+  </div>
+  <div class="actions">
+    <button class="btn" id="freezeBtn" aria-pressed="false">停止 <kbd>Space</kbd></button>
+    <button class="btn" id="randomBtn">ランダム <kbd>R</kbd></button>
+    <button class="btn" id="tiltBtn" hidden>傾きを使う</button>
+    <button class="btn" id="saveBtn">画像保存 <kbd>S</kbd></button>
+    <button class="btn" id="clearBtn">消去 <kbd>C</kbd></button>
+    <button class="btn" id="hideBtn" title="操作パネルを隠す (H)">隠す</button>
+  </div>
+</div>
+<button class="btn toggle-ui" id="showBtn">パネル表示 <kbd>H</kbd></button>
+
+<div class="overlay" id="overlay" hidden>
+  <div class="sheet" role="dialog" aria-label="画像の保存">
+    <img id="shot" alt="書き出した万華鏡の画像">
+    <p>保存されない場合は、画像を長押し（PCは右クリック）して保存してください。</p>
+    <div class="row">
+      <a class="btn" id="dlLink" download="kaleidoscope.png">ダウンロード</a>
+      <button class="btn" id="closeShot">閉じる</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('scope');
+  const ctx = canvas.getContext('2d');
+  const src = document.createElement('canvas');   // one mirror wedge lives here
+  const sctx = src.getContext('2d');
+  const comp = document.createElement('canvas');  // wedge = trails + gems, rebuilt each frame
+  const cctx = comp.getContext('2d');
+
+  const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // ---- color modes ------------------------------------------------------
+  const MODES = [
+    { id: 'rainbow', name: '虹',     hues: null,              s: 95, l: 62 },
+    { id: 'neon',    name: 'ネオン', hues: [185, 300, 55],    s: 100, l: 60 },
+    { id: 'sunset',  name: '夕焼け', hues: [345, 15, 40, 285], s: 92, l: 62 },
+    { id: 'ocean',   name: '深海',   hues: [165, 195, 225, 260], s: 85, l: 60 },
+    { id: 'pastel',  name: 'パステル', hues: null,            s: 75, l: 80 },
+    { id: 'mono',    name: '白銀',   hues: [230],             s: 12, l: 82 },
+  ];
+  const swatchBg = {
+    rainbow: 'conic-gradient(#ff4d6d,#ffd23f,#3bf26b,#3ad6ff,#7b5cff,#ff4dd2,#ff4d6d)',
+    neon: 'conic-gradient(#14f1ff,#ff2bd6,#fff23a,#14f1ff)',
+    sunset: 'conic-gradient(#ff3d6e,#ff7a3d,#ffb83d,#a64dff,#ff3d6e)',
+    ocean: 'conic-gradient(#1ff2c8,#2bb8ff,#3d6bff,#7a4dff,#1ff2c8)',
+    pastel: 'conic-gradient(#ffb3c6,#fff1a8,#b8ffcb,#b3e7ff,#d7c2ff,#ffb3c6)',
+    mono: 'conic-gradient(#ffffff,#9aa0b8,#ffffff)',
+  };
+
+  // ---- state -----------------------------------------------------------
+  const state = {
+    segments: 8,
+    mode: 'rainbow',
+    trail: 70,          // 0 = quick fade, 100 = never fades
+    frozen: false,
+    hueBase: 200,
+    rotSpeed: reduceMotion ? 0 : 0.06,   // radians / second
+    width: 3,
+    gemCount: 40,
+  };
+  let angle = 0, time = 0, last = performance.now();
+  let W = 0, H = 0, dpr = 1, R = 0;
+
+  // pointer: raw target + smoothed brush
+  const ptr = { x: 0, y: 0, active: false, lastMove: -1e9 };
+  const brush = { x: 0, y: 0, px: 0, py: 0, ready: false };
+  let userTouched = false;
+  let auto = { a: 1.7, b: 2.3, phase: 0.6, amp: 0.36 };
+
+  // ---- sizing ------------------------------------------------------------
+  function resize() {
+    const keep = document.createElement('canvas');
+    keep.width = src.width; keep.height = src.height;
+    if (src.width) keep.getContext('2d').drawImage(src, 0, 0);
+
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    W = innerWidth; H = innerHeight;
+    canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
+    R = Math.ceil(Math.hypot(W, H) / 2) + 2;
+    src.width = src.height = Math.ceil(R * dpr);
+    sctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    sctx.lineCap = sctx.lineJoin = 'round';
+    if (keep.width) sctx.drawImage(keep, 0, 0, keep.width / dpr, keep.height / dpr);
+    comp.width = comp.height = src.width;
+    cctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    if (!gemsSeeded) { seedGems(); gemsSeeded = true; }
+    composeWedge();
+    render();
+  }
+
+  // ---- gems: beads and sequins floating in the object chamber ------------
+  const SHAPES = ['bead', 'bead', 'diamond', 'star', 'sequin', 'shard'];
+  let gems = [], gemsSeeded = false;
+  const gravity = { x: 0, y: 0, fromSensor: false, lastSensor: -1e9 };
+
+  function chamberRadius() { return Math.min(W, H) * 0.47; }
+  function makeGem() {
+    const rc = chamberRadius();
+    const a = Math.random() * Math.PI * 2, d = Math.sqrt(Math.random()) * rc * 0.95;
+    return {
+      x: Math.cos(a) * d, y: Math.sin(a) * d, vx: 0, vy: 0,
+      size: 3.5 + Math.pow(Math.random(), 1.8) * 11,
+      shape: SHAPES[Math.floor(Math.random() * SHAPES.length)],
+      rot: Math.random() * 6.28, spin: (Math.random() - 0.5) * 0.8,
+      seed: Math.random() * 600,
+      drift: 0.6 + Math.random() * 0.7,           // how strongly the current carries it
+      wp: Math.random() * 6.28, wq: Math.random() * 6.28, ws: 0.25 + Math.random() * 0.5,
+      tw: Math.random() * 6.28, twSpeed: 1.5 + Math.random() * 3,
+    };
+  }
+  function seedGems() { gems = Array.from({ length: state.gemCount }, makeGem); }
+  function setGemCount(n) {
+    state.gemCount = n;
+    $('gemCount').value = n; $('gemVal').textContent = n;
+    while (gems.length < n) gems.push(makeGem());
+    if (gems.length > n) gems.length = n;
+    if (state.frozen) { composeWedge(); render(); }
+  }
+
+  function stepGems(dt, now) {
+    if (now - gravity.lastSensor > 1500) {
+      // no tilt sensor: a slow current that turns by itself
+      gravity.fromSensor = false;
+      const a = time * 0.25;
+      gravity.x = Math.cos(a) * 0.35; gravity.y = Math.sin(a) * 0.35;
+    }
+    const rc = chamberRadius();
+    const current = 85;                      // px/s at full tilt
+    const ease = 1 - Math.pow(0.35, dt);     // slow response = floaty inertia
+    for (const p of gems) {
+      // each piece wanders on its own, like something suspended in water
+      const wx = Math.sin(time * p.ws + p.wp) * 22 + Math.sin(time * p.ws * 2.3 + p.wq) * 9;
+      const wy = Math.cos(time * p.ws * 0.9 + p.wq) * 22 + Math.sin(time * p.ws * 1.7 + p.wp) * 9;
+      const tvx = gravity.x * current * p.drift + wx;
+      const tvy = gravity.y * current * p.drift + wy;
+      p.vx += (tvx - p.vx) * ease;
+      p.vy += (tvy - p.vy) * ease;
+      p.x += p.vx * dt; p.y += p.vy * dt;
+      p.rot += (p.spin + p.vx * 0.004) * dt;
+      // drifting out of the chamber: come back in from the opposite side
+      const d = Math.hypot(p.x, p.y);
+      if (d > rc) {
+        const k = (rc * 0.98) / d;
+        p.x = -p.x * k; p.y = -p.y * k;
+      }
+      p.fade = Math.min(1, Math.max(0, (rc - d) / (rc * 0.2)));
+    }
+    // soft spacing so pieces don't clump
+    for (let i = 0; i < gems.length; i++) {
+      const a = gems[i];
+      for (let j = i + 1; j < gems.length; j++) {
+        const b = gems[j];
+        const dx = b.x - a.x, dy = b.y - a.y, min = (a.size + b.size) * 0.9;
+        const d2 = dx * dx + dy * dy;
+        if (d2 > 0.01 && d2 < min * min) {
+          const d = Math.sqrt(d2), push = (min - d) * 0.15, ux = dx / d, uy = dy / d;
+          a.x -= ux * push; a.y -= uy * push; b.x += ux * push; b.y += uy * push;
+        }
+      }
+    }
+  }
+
+  function gemPath(c, shape, s) {
+    c.beginPath();
+    if (shape === 'bead') {
+      c.arc(0, 0, s, 0, Math.PI * 2);
+    } else if (shape === 'diamond') {
+      c.moveTo(0, -s * 1.3); c.lineTo(s * 0.8, 0); c.lineTo(0, s * 1.3); c.lineTo(-s * 0.8, 0); c.closePath();
+    } else if (shape === 'star') {
+      for (let k = 0; k < 10; k++) {
+        const r = k % 2 ? s * 0.45 : s * 1.2, a = k * Math.PI / 5 - Math.PI / 2;
+        k ? c.lineTo(r * Math.cos(a), r * Math.sin(a)) : c.moveTo(r * Math.cos(a), r * Math.sin(a));
+      }
+      c.closePath();
+    } else if (shape === 'sequin') {
+      c.arc(0, 0, s, 0, Math.PI * 2); c.arc(0, 0, s * 0.42, 0, Math.PI * 2, true);
+    } else {
+      c.moveTo(-s, s * 0.7); c.lineTo(s * 1.1, s * 0.4); c.lineTo(-s * 0.2, -s * 1.1); c.closePath();
+    }
+  }
+
+  function drawGems(c) {
+    const cx = W / 2, cy = H / 2;
+    for (const p of gems) {
+      const f = fold(cx + p.x, cy + p.y);
+      const col = colorAt(p.seed);
+      const s = p.size, fade = p.fade ?? 1;
+      if (fade <= 0) continue;
+      c.save();
+      c.translate(f.x, f.y);
+      c.rotate(p.rot);
+      // body
+      c.globalCompositeOperation = 'source-over';
+      c.globalAlpha = 0.9 * fade;
+      c.fillStyle = col;
+      c.shadowColor = col; c.shadowBlur = 8 * dpr;
+      gemPath(c, p.shape, s);
+      c.fill('evenodd');
+      c.shadowBlur = 0;
+      // facet highlight
+      c.globalAlpha = 0.75 * fade;
+      const hl = c.createRadialGradient(-s * 0.35, -s * 0.4, 0, -s * 0.35, -s * 0.4, s * 0.9);
+      hl.addColorStop(0, 'rgba(255,255,255,0.95)');
+      hl.addColorStop(1, 'rgba(255,255,255,0)');
+      c.fillStyle = hl;
+      gemPath(c, p.shape, s);
+      c.fill('evenodd');
+      // twinkle flare
+      const tw = Math.pow(Math.max(0, Math.sin(time * p.twSpeed + p.tw)), 10);
+      if (tw > 0.05) {
+        c.rotate(-p.rot);
+        c.globalAlpha = tw * fade;
+        c.globalCompositeOperation = 'lighter';
+        c.strokeStyle = '#fff'; c.lineWidth = 1.2; c.lineCap = 'round';
+        const L = s * 2.6;
+        c.beginPath();
+        c.moveTo(-L, 0); c.lineTo(L, 0); c.moveTo(0, -L); c.lineTo(0, L);
+        c.stroke();
+      }
+      c.restore();
+    }
+    c.globalAlpha = 1;
+    c.globalCompositeOperation = 'source-over';
+  }
+
+  function composeWedge() {
+    cctx.setTransform(1, 0, 0, 1, 0, 0);
+    cctx.clearRect(0, 0, comp.width, comp.height);
+    cctx.drawImage(src, 0, 0);
+    cctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    if (gems.length) drawGems(cctx);
+  }
+
+  // ---- tilt sensor -------------------------------------------------------
+  function onOrient(e) {
+    if (e.beta == null || e.gamma == null) return;
+    const rad = Math.PI / 180;
+    let gx = Math.sin(e.gamma * rad), gy = Math.sin(e.beta * rad);
+    // match the screen's current rotation
+    const so = (screen.orientation && screen.orientation.angle) || window.orientation || 0;
+    const a = -so * rad;
+    const rx = gx * Math.cos(a) - gy * Math.sin(a), ry = gx * Math.sin(a) + gy * Math.cos(a);
+    gravity.x += (rx - gravity.x) * 0.3; gravity.y += (ry - gravity.y) * 0.3;
+    gravity.fromSensor = true;
+    gravity.lastSensor = performance.now();
+  }
+  function startTilt() {
+    window.addEventListener('deviceorientation', onOrient);
+  }
+
+  // Map a screen point into the wedge (polar fold: continuous triangle wave on the angle)
+  function fold(x, y) {
+    const dx = x - W / 2, dy = y - H / 2;
+    const r = Math.hypot(dx, dy);
+    const h = Math.PI / state.segments;
+    let t = Math.atan2(dy, dx) - angle;
+    t = ((t % (2 * h)) + 2 * h) % (2 * h);
+    if (t > h) t = 2 * h - t;
+    return { x: r * Math.cos(t), y: r * Math.sin(t), r };
+  }
+
+  function hueLerp(a, b, f) {
+    let d = ((b - a + 540) % 360) - 180;
+    return a + d * f;
+  }
+  function colorAt(r) {
+    const m = MODES.find(m => m.id === state.mode);
+    let h;
+    if (!m.hues) {
+      h = state.hueBase + time * 45 + r * 0.35;
+    } else if (m.hues.length === 1) {
+      h = m.hues[0];
+      const l = 62 + 30 * Math.sin(time * 1.3 + r * 0.02);
+      return `hsl(${h} ${m.s}% ${l}%)`;
+    } else {
+      const k = (time * 0.35 + r / 260 + state.hueBase / 90) % m.hues.length;
+      const i = Math.floor(k), f = k - i;
+      const ease = f * f * (3 - 2 * f);
+      h = hueLerp(m.hues[i], m.hues[(i + 1) % m.hues.length], ease);
+    }
+    return `hsl(${((h % 360) + 360) % 360} ${m.s}% ${m.l}%)`;
+  }
+
+  // ---- drawing into the wedge -------------------------------------------
+  function strokeTo(nx, ny) {
+    const dist = Math.hypot(nx - brush.px, ny - brush.py);
+    if (dist < 0.3) { brush.px = nx; brush.py = ny; return; }
+    const steps = Math.max(1, Math.ceil(dist / 6));
+    const a = fold(brush.px, brush.py);
+    const col = colorAt(a.r);
+    const w = Math.max(0.8, state.width * (1.6 - Math.min(dist, 60) / 50));
+
+    sctx.globalCompositeOperation = 'lighter';
+    sctx.strokeStyle = col;
+    sctx.shadowColor = col;
+    sctx.shadowBlur = 10 * dpr;
+    sctx.lineWidth = w;
+    sctx.beginPath();
+    sctx.moveTo(a.x, a.y);
+    for (let i = 1; i <= steps; i++) {
+      const f = i / steps;
+      const p = fold(brush.px + (nx - brush.px) * f, brush.py + (ny - brush.py) * f);
+      sctx.lineTo(p.x, p.y);
+    }
+    sctx.stroke();
+    // a bright core keeps lines crisp under the glow
+    sctx.shadowBlur = 0;
+    sctx.lineWidth = w * 0.35;
+    sctx.strokeStyle = 'rgba(255,255,255,0.55)';
+    sctx.stroke();
+    brush.px = nx; brush.py = ny;
+  }
+
+  function fadeWedge(dt) {
+    if (state.trail >= 100) return;
+    // trail 0 → ~0.4 s half-life, trail 99 → ~20 s
+    const halfLife = 0.4 * Math.pow(50, state.trail / 99);
+    const a = 1 - Math.pow(0.5, dt / halfLife);
+    sctx.globalCompositeOperation = 'destination-out';
+    sctx.shadowBlur = 0;
+    sctx.fillStyle = `rgba(0,0,0,${Math.max(a, 0.012)})`;
+    sctx.fillRect(0, 0, R, R);
+    // 8-bit alpha rounding stalls tiny fades, leaving grey ghosts; a light periodic sweep clears them
+    if (++fadeTick % 6 === 0) {
+      sctx.fillStyle = 'rgba(0,0,0,0.08)';
+      sctx.fillRect(0, 0, R, R);
+    }
+  }
+  let fadeTick = 0;
+
+  // ---- compose the mirrored view ----------------------------------------
+  function render() {
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = '#07060d';
+    ctx.fillRect(0, 0, W, H);
+
+    const n = state.segments, w = 2 * Math.PI / n, h = Math.PI / n;
+    ctx.translate(W / 2, H / 2);
+    ctx.rotate(angle);
+    ctx.globalCompositeOperation = 'lighter';  // anti-aliased seams add back up to full
+    for (let i = 0; i < n; i++) {
+      for (let mirror = 0; mirror < 2; mirror++) {
+        ctx.save();
+        ctx.rotate(i * w);
+        if (mirror) ctx.scale(1, -1);
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.arc(0, 0, R, 0, h);
+        ctx.closePath();
+        ctx.clip();
+        ctx.drawImage(comp, 0, 0, R, R);
+        ctx.restore();
+      }
+    }
+    // soft vignette
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.globalCompositeOperation = 'source-over';
+    const g = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.25, W / 2, H / 2, R);
+    g.addColorStop(0, 'rgba(7,6,13,0)');
+    g.addColorStop(1, 'rgba(7,6,13,0.55)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  // ---- main loop -----------------------------------------------------------
+  function frame(now) {
+    requestAnimationFrame(frame);
+    const dt = Math.min((now - last) / 1000, 0.05);
+    last = now;
+    if (state.frozen) return;
+
+    time += dt;
+    angle += state.rotSpeed * dt;
+    fadeWedge(dt);
+
+    // pick the target: the user's pointer, or a drifting guide when idle
+    let tx, ty;
+    const idle = now - ptr.lastMove > 6000;
+    if (ptr.active && !idle) {
+      tx = ptr.x; ty = ptr.y;
+    } else if (!userTouched || (idle && state.trail < 100)) {
+      const m = Math.min(W, H) * auto.amp;
+      tx = W / 2 + m * Math.sin(time * auto.a * 0.5 + auto.phase) * (0.55 + 0.45 * Math.sin(time * 0.21));
+      ty = H / 2 + m * Math.sin(time * auto.b * 0.5) * (0.55 + 0.45 * Math.cos(time * 0.17));
+    }
+
+    if (tx !== undefined) {
+      if (!brush.ready) { brush.x = brush.px = tx; brush.y = brush.py = ty; brush.ready = true; }
+      // critically-damped-ish follow keeps strokes silky even with jumpy input
+      const k = 1 - Math.pow(0.0005, dt);
+      brush.x += (tx - brush.x) * k;
+      brush.y += (ty - brush.y) * k;
+      strokeTo(brush.x, brush.y);
+    } else {
+      brush.ready = false;
+    }
+    if (gems.length) stepGems(dt, now);
+    composeWedge();
+    render();
+  }
+
+  // ---- input ----------------------------------------------------------------
+  function onMove(e) {
+    if (state.frozen) return;
+    if (!ptr.active) brush.ready = false;
+    ptr.x = e.clientX; ptr.y = e.clientY; ptr.active = true;
+    ptr.lastMove = performance.now();
+    if (!userTouched) { userTouched = true; brush.ready = false; document.getElementById('brand').style.opacity = 0.55; }
+  }
+  canvas.addEventListener('pointermove', onMove);
+  canvas.addEventListener('pointerdown', e => { onMove(e); brush.ready = false; });
+  canvas.addEventListener('pointerleave', () => { ptr.active = false; });
+  canvas.addEventListener('pointerup', e => { if (e.pointerType !== 'mouse') ptr.active = false; });
+  canvas.addEventListener('pointercancel', () => { ptr.active = false; });
+
+  // ---- controls -------------------------------------------------------------
+  const $ = id => document.getElementById(id);
+  const segInput = $('segments'), segVal = $('segVal'), trailInput = $('trail');
+  const swWrap = $('swatches');
+
+  MODES.forEach(m => {
+    const b = document.createElement('button');
+    b.className = 'sw'; b.id = 'mode-' + m.id;
+    b.style.background = swatchBg[m.id];
+    b.title = m.name; b.setAttribute('aria-label', m.name);
+    b.addEventListener('click', () => setMode(m.id));
+    swWrap.appendChild(b);
+  });
+
+  function setMode(id) {
+    state.mode = id;
+    swWrap.querySelectorAll('.sw').forEach(b => b.setAttribute('aria-pressed', b.id === 'mode-' + id));
+  }
+  function setSegments(n) {
+    state.segments = Math.max(2, Math.min(24, n));
+    segInput.value = state.segments; segVal.textContent = state.segments;
+    if (state.frozen) { composeWedge(); render(); }
+  }
+  function setTrail(v) { state.trail = v; trailInput.value = v; }
+  function setFrozen(f) {
+    state.frozen = f;
+    $('freezeBtn').setAttribute('aria-pressed', f);
+    $('freezeBtn').firstChild.textContent = f ? '再開 ' : '停止 ';
+    $('frozenBadge').hidden = !f;
+    if (!f) { last = performance.now(); brush.ready = false; }
+  }
+  function clearAll() {
+    sctx.setTransform(1, 0, 0, 1, 0, 0);
+    sctx.clearRect(0, 0, src.width, src.height);
+    sctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    composeWedge();
+    render();
+  }
+  function randomize() {
+    const r = (a, b) => a + Math.random() * (b - a);
+    setSegments(Math.round(r(3, 18)));
+    setMode(MODES[Math.floor(Math.random() * MODES.length)].id);
+    state.hueBase = r(0, 360);
+    state.width = r(1.6, 5.5);
+    state.rotSpeed = reduceMotion ? 0 : r(-0.25, 0.25);
+    auto = { a: r(1, 3.2), b: r(1, 3.2), phase: r(0, 6.28), amp: r(0.2, 0.44) };
+    if (state.trail >= 100) setTrail(70);
+    seedGems();
+    clearAll();
+    ptr.lastMove = -1e9; brush.ready = false;    // let the guide paint a fresh preview
+    if (state.frozen) setFrozen(false);
+  }
+  let shotBlob = null;
+  function exportImage() {
+    render();
+    const url = canvas.toDataURL('image/png');
+    shotBlob = new Promise(res => canvas.toBlob(res, 'image/png'));   // same frame as the preview
+    $('shot').src = url;
+    $('dlLink').href = url;
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+    $('dlLink').download = `kaleidoscope-${stamp}.png`;
+    $('overlay').hidden = false;
+    $('closeShot').focus();
+  }
+  function toggleUI() {
+    $('dock').classList.toggle('hidden');
+    $('brand').hidden = $('dock').classList.contains('hidden');
+  }
+
+  segInput.addEventListener('input', () => setSegments(+segInput.value));
+  trailInput.addEventListener('input', () => setTrail(+trailInput.value));
+  $('freezeBtn').addEventListener('click', () => setFrozen(!state.frozen));
+  $('randomBtn').addEventListener('click', randomize);
+  $('gemCount').addEventListener('input', () => setGemCount(+$('gemCount').value));
+
+  // iPhone/iPad ask for permission from a tap; other phones just start sending tilt
+  const DOE = window.DeviceOrientationEvent;
+  if (DOE && typeof DOE.requestPermission === 'function') {
+    $('tiltBtn').hidden = false;
+    $('tiltBtn').addEventListener('click', async () => {
+      try {
+        if (await DOE.requestPermission() === 'granted') {
+          startTilt();
+          $('tiltBtn').hidden = true;
+        } else {
+          $('tiltBtn').textContent = '傾きは許可されませんでした';
+        }
+      } catch (err) {
+        $('tiltBtn').textContent = 'この画面では傾きを使えません';
+      }
+    });
+  } else if (DOE) {
+    startTilt();
+  }
+  $('saveBtn').addEventListener('click', exportImage);
+  $('clearBtn').addEventListener('click', clearAll);
+  $('hideBtn').addEventListener('click', toggleUI);
+  $('showBtn').addEventListener('click', toggleUI);
+  // Inside the Claude viewer plain download links are blocked; hand the file over through its save prompt instead.
+  let downloads = null;
+  if (window.claude && window.claude.use) {
+    window.claude.use('downloads').then(d => { downloads = d; }).catch(() => {});
+  }
+  $('dlLink').addEventListener('click', async e => {
+    if (!downloads) return;
+    e.preventDefault();
+    try {
+      await downloads.save({ filename: $('dlLink').download, data: await shotBlob });
+    } catch (err) { /* declined or unavailable: the long-press hint still works */ }
+  });
+  $('closeShot').addEventListener('click', () => { $('overlay').hidden = true; });
+  $('overlay').addEventListener('click', e => { if (e.target.id === 'overlay') $('overlay').hidden = true; });
+
+  addEventListener('keydown', e => {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (!$('overlay').hidden) { if (e.key === 'Escape') $('overlay').hidden = true; return; }
+    const tag = e.target.tagName;
+    if (tag === 'BUTTON' || tag === 'INPUT' || tag === 'A') {
+      if (e.key === ' ' || e.key === 'Enter' || e.key.startsWith('Arrow')) return;
+    }
+    switch (e.key.toLowerCase()) {
+      case ' ': e.preventDefault(); setFrozen(!state.frozen); break;
+      case 'r': randomize(); break;
+      case 's': exportImage(); break;
+      case 'c': clearAll(); break;
+      case 'h': toggleUI(); break;
+      case 'arrowup': case 'arrowright': setSegments(state.segments + 1); break;
+      case 'arrowdown': case 'arrowleft': setSegments(state.segments - 1); break;
+      default: {
+        const i = parseInt(e.key, 10);
+        if (i >= 1 && i <= MODES.length) setMode(MODES[i - 1].id);
+      }
+    }
+  });
+
+  addEventListener('resize', resize);
+  setMode(state.mode);
+  setSegments(state.segments);
+  resize();
+  requestAnimationFrame(t => { last = t; frame(t); });
+})();
+</script>
+</body>
+</html>
