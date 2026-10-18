@@ -24,9 +24,14 @@
 
   const cv = document.getElementById('c');
   const ctx = cv.getContext('2d');
-  // 背景（グラデーション＋砂利）は変化しないので別キャンバスに一度だけ描いて使い回す
-  const bg = document.createElement('canvas');
-  const bgx = bg.getContext('2d');
+  // 動かない部分（奥の壁・底砂）は別のキャンバスに一度だけ描いて使い回す
+  const wallC = document.createElement('canvas');
+  const wallX = wallC.getContext('2d');
+  const floorC = document.createElement('canvas');
+  const floorX = floorC.getContext('2d');
+  // 底に映る光の網目（コースティクス）を作業するキャンバス
+  const causC = document.createElement('canvas');
+  const causX = causC.getContext('2d');
 
   const rand = (a, b) => a + Math.random() * (b - a);
   const pick = arr => arr[(Math.random() * arr.length) | 0];
@@ -34,9 +39,22 @@
   const lerp = (a, b, t) => a + (b - a) * t;
   const TAU = Math.PI * 2;
   const wrapAngle = a => Math.atan2(Math.sin(a), Math.cos(a));
+  const hexRgb = h => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
+  const rgbStr = (c, a) => a === undefined
+    ? `rgb(${c[0] | 0},${c[1] | 0},${c[2] | 0})`
+    : `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${a.toFixed(3)})`;
+  const mixRgb = (a, b, t) => [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)];
 
-  let W = 0, H = 0, DPR = 1, S = 1, sandTop = 0;
+  // 奥にあるものほど水の色にかすむ
+  const HAZE = [20, 84, 128];
+
+  let W = 0, H = 0, DPR = 1, S = 1;
+  let floorBack = 0, floorFront = 0;   // 底の奥の端／手前の端の高さ
   let simT = 0;
+  const M = 30;                         // 視点移動用のはみ出し幅
+  let BL = 140;                         // ベタの体長（口先〜尾の付け根）
+  let DEPTH = 300;                      // 水槽の奥行き
+  let FOC = 660;                        // 遠近感の強さ
 
   const bubbles = [];
   const plants = [];
@@ -44,86 +62,245 @@
   const ripples = [];
   const nest = [];
 
-  // 砂利の表面の高さ（少し波打たせる）
-  const sandY = x => sandTop + Math.sin(x * 0.013) * 6 * S + Math.sin(x * 0.037 + 1) * 3 * S;
-  // 水面の高さ
+  // 奥行き zN：0 = 手前のガラス、1 = 奥の壁
+  const floorY = zN => lerp(floorFront, floorBack, zN);
+  const depthK = zN => FOC / (FOC + (zN - 0.5) * DEPTH);
+  const groundY = (x, zN) => floorY(zN) + (Math.sin(x * 0.013) * 4 + Math.sin(x * 0.037 + 1) * 2) * S * (1 - zN * 0.6);
   const surfY = x => 8 * S + Math.sin(x * 0.02 + simT * 1.5) * 3 * S + Math.sin(x * 0.007 - simT) * 4 * S;
 
-  // ---------------- 背景 ----------------
-  function drawBackground() {
-    const g = bgx;
-    g.setTransform(DPR, 0, 0, DPR, 0, 0);
+  // 視点（マウスの位置で少しだけ動く）。手前ほど大きくずれて立体的に見える
+  const cam = { x: 0, y: 0 };
+  const shiftX = zN => -cam.x * lerp(1, 0.2, zN);
+  const shiftY = zN => -cam.y * lerp(1, 0.2, zN);
 
+  // ---------------- 奥の壁 ----------------
+  function bakeWall() {
+    wallC.width = Math.round((W + 2 * M) * DPR);
+    wallC.height = Math.round((H + 2 * M) * DPR);
+    const g = wallX;
+    g.setTransform(DPR, 0, 0, DPR, M * DPR, M * DPR);
     const water = g.createLinearGradient(0, 0, 0, H);
-    water.addColorStop(0, '#6fd0f0');
-    water.addColorStop(0.3, '#2a8cc4');
-    water.addColorStop(0.7, '#0d4a80');
-    water.addColorStop(1, '#04203a');
+    water.addColorStop(0, '#7fd6f2');
+    water.addColorStop(0.35, '#2f93c8');
+    water.addColorStop(0.75, '#11578e');
+    water.addColorStop(1, '#06294a');
     g.fillStyle = water;
-    g.fillRect(0, 0, W, H);
+    g.fillRect(-M, -M, W + 2 * M, H + 2 * M);
 
-    // 奥の水草（動かないシルエットで奥行きを出す）
-    g.fillStyle = 'rgba(10, 60, 70, 0.35)';
-    const farCount = Math.ceil(W / 60);
+    // ずっと奥の岩山と水草（ぼかして遠くに見せる）
+    const canBlur = 'filter' in g;
+    if (canBlur) g.filter = `blur(${(3 * S).toFixed(1)}px)`;
+    g.fillStyle = 'rgba(10,52,78,0.55)';
+    g.beginPath();
+    g.moveTo(-M, floorBack + 10);
+    const ph1 = rand(0, TAU), ph2 = rand(0, TAU);
+    for (let x = -M; x <= W + M; x += 12) {
+      const hgt = (0.5 + 0.5 * Math.sin(x * 0.004 + ph1)) * (0.6 + 0.4 * Math.sin(x * 0.011 + ph2));
+      g.lineTo(x, floorBack + 6 - hgt * H * 0.16);
+    }
+    g.lineTo(W + M, floorBack + 10);
+    g.closePath();
+    g.fill();
+    g.fillStyle = 'rgba(14,70,82,0.45)';
+    const farCount = Math.ceil(W / 45);
     for (let i = 0; i < farCount; i++) {
-      const bx = rand(0, W), h = rand(0.15, 0.35) * H, w = rand(6, 14) * S, lean = rand(-30, 30) * S;
-      const by = sandTop + 4 * S;
+      const bx = rand(-M, W + M), h = rand(0.1, 0.3) * H, w = rand(5, 12) * S, lean = rand(-25, 25) * S;
+      const by = floorBack + 6;
       g.beginPath();
       g.moveTo(bx - w / 2, by);
       g.quadraticCurveTo(bx + lean * 0.3 - w / 2, by - h * 0.6, bx + lean, by - h);
       g.quadraticCurveTo(bx + lean * 0.3 + w / 2, by - h * 0.6, bx + w / 2, by);
       g.fill();
     }
+    if (canBlur) g.filter = 'none';
+    // 奥のもや
+    const fog = g.createLinearGradient(0, floorBack - H * 0.35, 0, floorBack + 10);
+    fog.addColorStop(0, 'rgba(20,84,128,0)');
+    fog.addColorStop(1, 'rgba(20,84,128,0.55)');
+    g.fillStyle = fog;
+    g.fillRect(-M, floorBack - H * 0.35, W + 2 * M, H * 0.35 + 10);
+  }
 
-    // 砂地
-    const sand = g.createLinearGradient(0, sandTop - 10 * S, 0, H);
-    sand.addColorStop(0, '#9a8a68');
-    sand.addColorStop(1, '#3a3124');
+  // ---------------- 底砂（奥に向かって小さく・かすんでいく） ----------------
+  function bakeFloor() {
+    floorC.width = wallC.width;
+    floorC.height = wallC.height;
+    const g = floorX;
+    g.setTransform(DPR, 0, 0, DPR, M * DPR, M * DPR);
+    g.clearRect(-M, -M, W + 2 * M, H + 2 * M);
+
+    const sand = g.createLinearGradient(0, floorBack, 0, H);
+    sand.addColorStop(0, '#3e5a62');
+    sand.addColorStop(0.35, '#7c7258');
+    sand.addColorStop(1, '#a69470');
     g.fillStyle = sand;
     g.beginPath();
-    g.moveTo(0, H);
-    for (let x = 0; x <= W; x += 10) g.lineTo(x, sandY(x));
-    g.lineTo(W, sandY(W));
-    g.lineTo(W, H);
+    g.moveTo(-M, H + M);
+    for (let x = -M; x <= W + M; x += 10) g.lineTo(x, groundY(x, 1));
+    g.lineTo(W + M, H + M);
     g.closePath();
     g.fill();
 
-    // 石
-    for (let i = 0; i < 2; i++) {
-      const rx = rand(0.15, 0.85) * W, rw = rand(40, 70) * S, rh = rand(22, 38) * S;
-      const ry = sandY(rx) + rh * 0.35;
-      const rg = g.createRadialGradient(rx - rw * 0.3, ry - rh * 0.5, 2, rx, ry, rw);
-      rg.addColorStop(0, '#8c949a');
-      rg.addColorStop(1, '#3b4247');
-      g.fillStyle = rg;
-      g.beginPath();
-      g.ellipse(rx, ry, rw, rh, rand(-0.15, 0.15), 0, TAU);
-      g.fill();
-    }
+    const colors = ['#b8a888', '#9c8b6e', '#d6c9a8', '#7d6e57', '#a39478', '#c2b59a', '#6b5e4b', '#8f8a80', '#5f5850'].map(hexRgb);
+    const items = [];
+    const count = Math.min(4500, (W * (floorFront - floorBack)) / 18);
+    for (let i = 0; i < count; i++) items.push({ zN: Math.random(), x: rand(-M, W + M), c: pick(colors) });
+    for (let i = 0; i < 3; i++) items.push({ zN: rand(0.45, 0.85), x: rand(0.1, 0.9) * W, rock: true });
+    items.sort((a, b) => b.zN - a.zN);
 
-    // 砂利の粒
-    const colors = ['#b8a888', '#9c8b6e', '#d6c9a8', '#7d6e57', '#a39478', '#c2b59a', '#6b5e4b', '#8f8a80'];
-    const depth = H - sandTop;
-    const count = Math.min(2200, (W * depth) / 40);
-    for (let i = 0; i < count; i++) {
-      const x = rand(0, W);
-      const y = rand(sandY(x) + 1, H + 2);
-      const r = rand(1.5, 4.5) * S;
-      g.fillStyle = pick(colors);
+    for (const it of items) {
+      const k = depthK(it.zN);
+      const y = groundY(it.x, it.zN);
+      if (it.rock) {
+        const rw = rand(45, 80) * S * k, rh = rand(26, 44) * S * k;
+        const ry = y - rh * 0.45;
+        // 接地の影
+        g.fillStyle = 'rgba(0,10,20,0.35)';
+        g.beginPath();
+        g.ellipse(it.x + rw * 0.1, y + 2 * k, rw * 1.05, rh * 0.28, 0, 0, TAU);
+        g.fill();
+        const rg = g.createRadialGradient(it.x - rw * 0.35, ry - rh * 0.55, 2, it.x, ry, rw * 1.1);
+        const top = mixRgb([150, 158, 162], HAZE, it.zN * 0.5), bot = mixRgb([40, 46, 52], HAZE, it.zN * 0.4);
+        rg.addColorStop(0, rgbStr(top));
+        rg.addColorStop(0.55, rgbStr(mixRgb(top, bot, 0.55)));
+        rg.addColorStop(1, rgbStr(bot));
+        g.fillStyle = rg;
+        g.beginPath();
+        g.moveTo(it.x - rw, y);
+        g.bezierCurveTo(it.x - rw * 1.05, ry - rh * 0.7, it.x - rw * 0.3, ry - rh * 1.1, it.x + rw * 0.2, ry - rh * 0.95);
+        g.bezierCurveTo(it.x + rw * 0.8, ry - rh * 0.8, it.x + rw * 1.05, ry - rh * 0.1, it.x + rw, y);
+        g.closePath();
+        g.fill();
+        continue;
+      }
+      const r = rand(1.6, 4.6) * S * k * k;
+      const col = mixRgb(it.c, HAZE, it.zN * 0.6);
+      const yy = y + rand(-1.5, 1.5) * k;
+      g.fillStyle = `rgba(0,8,16,${(0.3 * (1 - it.zN * 0.5)).toFixed(2)})`;
       g.beginPath();
-      g.ellipse(x, y, r, r * rand(0.6, 0.9), rand(0, Math.PI), 0, TAU);
+      g.ellipse(it.x + r * 0.2, yy + r * 0.45, r * 1.05, r * 0.6, 0, 0, TAU);
       g.fill();
-      g.fillStyle = 'rgba(255,255,255,0.18)';
+      g.fillStyle = rgbStr(col);
       g.beginPath();
-      g.arc(x - r * 0.3, y - r * 0.3, r * 0.35, 0, TAU);
+      g.ellipse(it.x, yy, r, r * rand(0.55, 0.8), rand(-0.4, 0.4), 0, TAU);
+      g.fill();
+      g.fillStyle = `rgba(255,255,255,${(0.25 * (1 - it.zN * 0.6)).toFixed(2)})`;
+      g.beginPath();
+      g.ellipse(it.x - r * 0.3, yy - r * 0.3, r * 0.4, r * 0.25, -0.3, 0, TAU);
       g.fill();
     }
-    // 深いところほど暗く
-    const shade = g.createLinearGradient(0, sandTop, 0, H);
-    shade.addColorStop(0, 'rgba(0,20,40,0)');
-    shade.addColorStop(1, 'rgba(0,20,40,0.55)');
-    g.fillStyle = shade;
-    g.fillRect(0, sandTop - 10 * S, W, H - sandTop + 10 * S);
+    // 奥はかすむ
+    const fog = g.createLinearGradient(0, floorBack - 4, 0, lerp(floorBack, floorFront, 0.7));
+    fog.addColorStop(0, 'rgba(20,84,128,0.7)');
+    fog.addColorStop(1, 'rgba(20,84,128,0)');
+    g.fillStyle = fog;
+    g.fillRect(-M, floorBack - 20, W + 2 * M, (floorFront - floorBack) * 0.7 + 20);
+  }
+
+  // 底砂は奥行きごとに細切りにして、視点移動のずれ方を変える
+  function drawFloor() {
+    const SL = 10;
+    const fw = floorC.width, sx = DPR;
+    for (let i = 0; i < SL; i++) {
+      const zA = 1 - i / SL, zB = 1 - (i + 1) / SL;
+      const y0 = i === 0 ? floorBack - 30 * S : floorY(zA) - 1;
+      const y1 = i === SL - 1 ? H + M : floorY(zB) + 1;
+      const zm = (zA + zB) / 2;
+      const dx = shiftX(zm), dy = shiftY(zm);
+      ctx.drawImage(floorC, 0, (y0 + M) * sx, fw, (y1 - y0) * sx, -M + dx, y0 + dy, W + 2 * M, y1 - y0);
+    }
+  }
+
+  // ---------------- 光の網目（コースティクス） ----------------
+  // 水面のゆらぎで底に映る光の模様。最初に数十コマぶん作っておき、つなぎ目なく再生する
+  const CT = 128, CF = 48;
+  const caus = [];
+  const patMain = [], patCaus = [];
+  function genCaustic(f) {
+    const c = document.createElement('canvas');
+    c.width = c.height = CT;
+    const g = c.getContext('2d');
+    const img = g.createImageData(CT, CT);
+    const T = (f / CF) * TAU;
+    const mult = [-2, -1, 1, 2];
+    for (let y = 0; y < CT; y++) {
+      for (let x = 0; x < CT; x++) {
+        const px = (x / CT) * TAU - 250, py = (y / CT) * TAU - 250;
+        let ix = px, iy = py, cc = 1;
+        for (let n = 0; n < 4; n++) {
+          const t = T * mult[n] + n * 1.3;
+          const nx = px + Math.cos(t - ix) + Math.sin(t + iy);
+          const ny = py + Math.sin(t - iy) + Math.cos(t + ix);
+          ix = nx; iy = ny;
+          cc += 1 / Math.hypot(px / (Math.sin(ix + t) / 0.005), py / (Math.cos(iy + t) / 0.005));
+        }
+        cc /= 4;
+        cc = 1.17 - Math.pow(cc, 1.4);
+        const v = clamp(Math.pow(Math.abs(cc), 8) * 2.4, 0, 1);
+        const o = (y * CT + x) * 4;
+        img.data[o] = 215; img.data[o + 1] = 242; img.data[o + 2] = 255;
+        img.data[o + 3] = v * 255;
+      }
+    }
+    g.putImageData(img, 0, 0);
+    return c;
+  }
+
+  function causFrames() {
+    if (caus.length < CF) return null;
+    const fpos = simT * 7;
+    const i0 = Math.floor(fpos) % CF;
+    return { i0, i1: (i0 + 1) % CF, a: fpos - Math.floor(fpos) };
+  }
+
+  function patternFor(cache, c2d, i) {
+    return cache[i] || (cache[i] = c2d.createPattern(caus[i], 'repeat'));
+  }
+
+  // 対象のキャンバスに光の網目を塗る（2コマを重ねてなめらかに切り替える）
+  function fillCaustic(c2d, cache, fr, sx, sy, ox, oy, x, y, w, h) {
+    const m = new DOMMatrix([sx, 0, 0, sy, ox, oy]);
+    const p0 = patternFor(cache, c2d, fr.i0), p1 = patternFor(cache, c2d, fr.i1);
+    p0.setTransform(m);
+    p1.setTransform(m);
+    const ga = c2d.globalAlpha;
+    c2d.globalAlpha = ga * (1 - fr.a);
+    c2d.fillStyle = p0;
+    c2d.fillRect(x, y, w, h);
+    c2d.globalAlpha = ga * fr.a;
+    c2d.fillStyle = p1;
+    c2d.fillRect(x, y, w, h);
+    c2d.globalAlpha = ga;
+  }
+
+  function drawFloorCaustics() {
+    const fr = causFrames();
+    if (!fr) return;
+    // 軽くするため半分の解像度で作って引き伸ばす
+    const top = floorBack - 10 * S, hh = Math.ceil((H - top) / 2), ww = Math.ceil(W / 2);
+    if (causC.width !== ww || causC.height !== hh) { causC.width = ww; causC.height = hh; }
+    causX.setTransform(1, 0, 0, 1, 0, 0);
+    causX.globalCompositeOperation = 'source-over';
+    causX.clearRect(0, 0, ww, hh);
+    // 大きさの違う2枚を重ねて、模様のくり返しを目立たなくする
+    const sc = 1.5 * S;
+    causX.globalAlpha = 0.6;
+    fillCaustic(causX, patCaus, fr, sc, sc * 0.4, 0, 0, 0, 0, ww, hh);
+    causX.globalCompositeOperation = 'lighter';
+    fillCaustic(causX, patCaus, { i0: (fr.i0 + 17) % CF, i1: (fr.i1 + 17) % CF, a: fr.a }, sc * 1.37, sc * 0.52, 61, 23, 0, 0, ww, hh);
+    causX.globalAlpha = 1;
+    causX.globalCompositeOperation = 'destination-in';
+    const mk = causX.createLinearGradient(0, 0, 0, hh);
+    mk.addColorStop(0, 'rgba(0,0,0,0.12)');
+    mk.addColorStop(0.5, 'rgba(0,0,0,0.5)');
+    mk.addColorStop(1, 'rgba(0,0,0,0.85)');
+    causX.fillStyle = mk;
+    causX.fillRect(0, 0, ww, hh);
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = 0.6;
+    ctx.drawImage(causC, shiftX(0.4), top + shiftY(0.4), ww * 2, hh * 2);
+    ctx.restore();
   }
 
   // ---------------- 光の筋 ----------------
@@ -133,8 +310,9 @@
 
   function drawRays(t) {
     ctx.save();
+    ctx.translate(shiftX(0.6), 0);
     ctx.globalCompositeOperation = 'lighter';
-    const len = sandTop;
+    const len = floorBack + (floorFront - floorBack) * 0.5;
     for (const r of rays) {
       const sway = Math.sin(t * r.sp + r.ph) * 40 * S;
       const a = 0.05 + 0.04 * Math.sin(t * r.sp * 2.3 + r.ph * 1.7);
@@ -154,16 +332,25 @@
     ctx.restore();
   }
 
-  // ---------------- 水面 ----------------
+  // ---------------- 水面（下から見上げた水面） ----------------
   function drawSurface() {
     ctx.beginPath();
-    ctx.moveTo(0, 0);
-    for (let x = 0; x <= W + 16; x += 16) ctx.lineTo(x, surfY(x));
-    ctx.lineTo(W + 16, 0);
+    ctx.moveTo(-M, 0);
+    for (let x = -M; x <= W + M; x += 16) ctx.lineTo(x, surfY(x));
+    ctx.lineTo(W + M, 0);
     ctx.closePath();
     ctx.fillStyle = 'rgba(255,255,255,0.13)';
     ctx.fill();
-    ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+    const fr = causFrames();
+    if (fr) {
+      ctx.save();
+      ctx.clip();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = 0.45;
+      fillCaustic(ctx, patMain, fr, 1.6 * S, 0.12 * S, shiftX(0.5), 0, -M, 0, W + 2 * M, 20 * S);
+      ctx.restore();
+    }
+    ctx.strokeStyle = 'rgba(255,255,255,0.35)';
     ctx.lineWidth = 1.5;
     ctx.stroke();
   }
@@ -178,66 +365,108 @@
       ctx.strokeStyle = `rgba(255,255,255,${(1 - r.t) * 0.55})`;
       ctx.lineWidth = 1.2;
       ctx.beginPath();
-      ctx.ellipse(r.x, r.y, rad, rad * 0.22, 0, 0, TAU);
+      ctx.ellipse(r.x + shiftX(r.zN), r.y, rad, rad * 0.22, 0, 0, TAU);
       ctx.stroke();
     }
   }
 
   // ---------------- 水草 ----------------
-  const plantColors = ['#2e8b57', '#3fa34d', '#1f6e43', '#5cb85c', '#7cbf3a', '#2a7a5a'];
+  const grassColors = ['#2e8b57', '#3fa34d', '#1f6e43', '#5cb85c', '#7cbf3a', '#2a7a5a'];
+  const swordColors = ['#3d9a3a', '#4fae45', '#2f8236', '#5bb84e'];
+  const redColors = ['#a8452f', '#c0583a', '#8e3a2a'];
 
   function makePlants() {
-    const n = clamp(Math.round(W / 150), 4, 10);
+    const n = clamp(Math.round(W / 110), 6, 14);
     for (let i = 0; i < n; i++) {
-      const red = Math.random() < 0.15;
+      let zN, fx;
+      if (i < 2) {
+        // 手前の両はしに少しだけ（ガラスのすぐ内側）
+        zN = rand(0.03, 0.16);
+        fx = i === 0 ? rand(0.0, 0.1) : rand(0.9, 1.0);
+      } else {
+        zN = rand(0.35, 0.96);
+        fx = (i - 2 + rand(0.1, 0.9)) / (n - 2);
+      }
+      const type = Math.random() < 0.3 ? 'sword' : 'grass';
+      const red = type === 'grass' && Math.random() < 0.15;
+      const count = type === 'sword' ? 5 + ((Math.random() * 4) | 0) : 3 + ((Math.random() * 3) | 0);
+      const haze = zN * 0.6;
       plants.push({
-        fx: (i + rand(0.15, 0.85)) / n,
-        front: Math.random() < 0.2,
-        blades: Array.from({ length: 3 + ((Math.random() * 3) | 0) }, () => ({
-          h: rand(0.25, 0.55), w: rand(9, 15), lean: rand(-0.25, 0.25), dx: rand(-8, 8),
-          ph: rand(0, TAU), sp: rand(0.6, 1.1),
-          col: red ? pick(['#a8452f', '#c0583a', '#8e3a2a']) : pick(plantColors)
-        }))
+        fx, zN, type,
+        blades: Array.from({ length: count }, (_, j) => {
+          const base = hexRgb(pick(type === 'sword' ? swordColors : red ? redColors : grassColors));
+          const col = mixRgb(base, HAZE, haze);
+          return type === 'sword'
+            ? {
+              h: rand(0.16, 0.3), w: rand(26, 40), lean: ((j / (count - 1)) - 0.5) * rand(1.0, 1.6), dx: rand(-4, 4),
+              ph: rand(0, TAU), sp: rand(0.5, 0.9), col: rgbStr(col), dark: rgbStr(mixRgb(col, [0, 20, 10], 0.35))
+            }
+            : {
+              h: rand(0.25, 0.55), w: rand(9, 15), lean: rand(-0.25, 0.25), dx: rand(-8, 8),
+              ph: rand(0, TAU), sp: rand(0.6, 1.1), col: rgbStr(col), dark: rgbStr(mixRgb(col, [0, 20, 10], 0.35))
+            };
+        })
       });
     }
+    plants.sort((a, b) => b.zN - a.zN);
   }
 
-  function drawBlade(bx, by, b, t) {
-    const n = 10, h = b.h * sandTop * 0.9, w = b.w * S;
-    const L = [], R = [];
+  const BLx = new Float32Array(15), BLy = new Float32Array(15), BLw = new Float32Array(15);
+  function drawBlade(bx, by, b, t, k, sword) {
+    const n = 14, h = b.h * H * 0.9 * k, w = b.w * S * k;
     for (let i = 0; i <= n; i++) {
-      const k = i / n;
-      const sway = Math.sin(t * b.sp + b.ph - k * 1.8) * 18 * S * k * k + b.lean * h * k * k;
-      const x = bx + sway, y = by - h * k;
-      const ww = w * (1 - k * 0.85) * (0.8 + 0.2 * Math.sin(k * 9 + b.ph));
-      L.push(x - ww / 2, y);
-      R.push(x + ww / 2, y);
+      const q = i / n;
+      const sway = Math.sin(t * b.sp + b.ph - q * 1.8) * 18 * S * k * q * q;
+      BLx[i] = bx + sway + b.lean * h * (sword ? q * q * 0.9 : q * q);
+      BLy[i] = by - h * q * (sword ? 1 - Math.abs(b.lean) * 0.25 * q : 1);
+      BLw[i] = sword
+        ? (q < 0.3 ? w * 0.05 : w * 0.5 * Math.pow(Math.sin(Math.PI * (q - 0.3) / 0.7), 0.8) + w * 0.03)
+        : w * 0.5 * (1 - q * 0.85) * (0.8 + 0.2 * Math.sin(q * 9 + b.ph));
     }
     ctx.beginPath();
-    ctx.moveTo(L[0], L[1]);
-    for (let i = 2; i < L.length; i += 2) ctx.lineTo(L[i], L[i + 1]);
-    for (let i = R.length - 2; i >= 0; i -= 2) ctx.lineTo(R[i], R[i + 1]);
+    ctx.moveTo(BLx[0] - BLw[0], BLy[0]);
+    for (let i = 1; i <= n; i++) ctx.lineTo(BLx[i] - BLw[i], BLy[i]);
+    for (let i = n; i >= 0; i--) ctx.lineTo(BLx[i] + BLw[i], BLy[i]);
     ctx.closePath();
     ctx.fillStyle = b.col;
     ctx.fill();
+    // 葉の右半分は影になる（光は左上から）
+    ctx.beginPath();
+    ctx.moveTo(BLx[0], BLy[0]);
+    for (let i = 1; i <= n; i++) ctx.lineTo(BLx[i], BLy[i]);
+    for (let i = n; i >= 0; i--) ctx.lineTo(BLx[i] + BLw[i], BLy[i]);
+    ctx.closePath();
+    ctx.fillStyle = b.dark;
+    ctx.fill();
+    // 葉脈
+    ctx.beginPath();
+    ctx.moveTo(BLx[0], BLy[0]);
+    for (let i = 1; i < n; i++) ctx.lineTo(BLx[i], BLy[i]);
+    ctx.strokeStyle = 'rgba(225,255,200,0.2)';
+    ctx.lineWidth = Math.max(0.6, k * S);
+    ctx.stroke();
   }
 
-  function drawPlants(t, front) {
-    for (const p of plants) {
-      if (p.front !== front) continue;
-      const x = p.fx * W;
-      for (const b of p.blades) drawBlade(x + b.dx * S, sandY(x) + 4 * S, b, t);
-    }
+  function drawPlant(p, t) {
+    const k = depthK(p.zN);
+    const x = p.fx * W;
+    ctx.save();
+    ctx.translate(shiftX(p.zN), shiftY(p.zN));
+    const by = groundY(x, p.zN) + 3 * S * k;
+    for (const b of p.blades) drawBlade(x + b.dx * S * k, by, b, t, k, p.type === 'sword');
+    ctx.restore();
   }
 
   // ---------------- 泡 ----------------
   // ベタは強い水流が苦手なので、エアーは控えめ（泡は少なめ）
   let emitter = 0.12;
+  const EMIT_Z = 0.85;
 
   function resetBubble(b, anywhere) {
     b.x = Math.random() < 0.8 ? emitter * W + rand(-4, 4) * S : rand(0, W);
-    b.y = anywhere ? rand(40 * S, sandTop) : sandY(b.x);
-    b.r = rand(1.2, 3.2) * S;
+    b.zN = EMIT_Z;
+    b.y = anywhere ? rand(40 * S, floorY(EMIT_Z)) : floorY(EMIT_Z);
+    b.r = rand(1.2, 3.2) * S * depthK(EMIT_Z);
     b.vy = rand(35, 65) * S;
     b.ph = rand(0, TAU);
     b.once = false;
@@ -255,28 +484,30 @@
   }
 
   function drawBubbleSet(list, t, wobble) {
+    const pos = list.map(b => [
+      b.x + (wobble ? Math.sin(t * 3 + b.ph) * 3 * S : 0) + shiftX(b.zN),
+      b.y + shiftY(b.zN), b.r
+    ]);
     ctx.beginPath();
-    for (const b of list) {
-      const x = b.x + (wobble ? Math.sin(t * 3 + b.ph) * 3 * S : 0);
-      ctx.moveTo(x + b.r, b.y);
-      ctx.arc(x, b.y, b.r, 0, TAU);
-    }
+    for (const [x, y, r] of pos) { ctx.moveTo(x + r, y); ctx.arc(x, y, r, 0, TAU); }
     ctx.strokeStyle = 'rgba(220,245,255,0.6)';
     ctx.lineWidth = 1;
     ctx.stroke();
     ctx.fillStyle = 'rgba(255,255,255,0.12)';
     ctx.fill();
     ctx.beginPath();
-    for (const b of list) {
-      const x = b.x + (wobble ? Math.sin(t * 3 + b.ph) * 3 * S : 0);
-      ctx.moveTo(x - b.r * 0.35, b.y - b.r * 0.35);
-      ctx.arc(x - b.r * 0.35, b.y - b.r * 0.35, b.r * 0.3, 0, TAU);
+    for (const [x, y, r] of pos) {
+      ctx.moveTo(x - r * 0.35 + r * 0.3, y - r * 0.35);
+      ctx.arc(x - r * 0.35, y - r * 0.35, r * 0.3, 0, TAU);
     }
     ctx.fillStyle = 'rgba(255,255,255,0.8)';
     ctx.fill();
   }
 
   // ---------------- 泡巣（オスのベタが水面に作る泡のかたまり） ----------------
+  let NEST_FX = 0.8;
+  const NEST_Z = 0.3;
+  const nestX = () => W * NEST_FX;
   function addNestBubbles(x, n) {
     for (let i = 0; i < n; i++) {
       if (nest.length > 90) nest.shift();
@@ -285,8 +516,6 @@
       nest.push({ dx: nx - nestX(), r: rand(1.5, 3.6) * S, life: rand(120, 220), layer: Math.random() });
     }
   }
-  const nestX = () => W * NEST_FX;
-  let NEST_FX = 0.8;
 
   function updateNest(dt) {
     for (let i = nest.length - 1; i >= 0; i--) {
@@ -299,20 +528,22 @@
     if (!nest.length) return;
     const list = nest.map(b => {
       const x = nestX() + b.dx;
-      return { x, y: surfY(x) + b.r + b.layer * 3 * S, r: b.r * Math.min(1, b.life / 3) };
+      return { x, y: surfY(x) + b.r + b.layer * 3 * S, r: b.r * Math.min(1, b.life / 3), zN: NEST_Z };
     });
     drawBubbleSet(list, 0, false);
   }
 
   // ---------------- エサ（ベタ用の浮くエサ） ----------------
+  const FOOD_Z = 0.35;
   function dropFood(cx) {
     const n = 2 + ((Math.random() * 2) | 0);
+    const wx = cx - shiftX(FOOD_Z);
     for (let i = 0; i < n; i++) {
       if (foods.length >= 20) foods.shift();
-      const x = clamp(cx + rand(-0.18, 0.18) * BL, 10, W - 10);
-      foods.push({ x, y: surfY(x), r: BL * 0.022, st: 'float', t: 0, ph: rand(0, TAU), life: 12 });
+      const x = clamp(wx + rand(-0.18, 0.18) * BL, 10, W - 10);
+      foods.push({ x, y: surfY(x), zN: FOOD_Z, r: BL * 0.022, st: 'float', t: 0, ph: rand(0, TAU), life: 12 });
     }
-    ripples.push({ x: cx, y: surfY(cx) + 2, t: 0, size: 1 });
+    ripples.push({ x: wx, y: surfY(wx) + 2, t: 0, size: 1, zN: FOOD_Z });
   }
 
   function updateFoods(dt) {
@@ -326,7 +557,8 @@
       } else if (f.st === 'sink') {
         f.y += BL * 0.15 * dt;
         f.x += Math.sin(simT * 2 + f.ph) * 6 * S * dt;
-        if (f.y >= sandY(f.x) - f.r) { f.y = sandY(f.x) - f.r; f.st = 'ground'; }
+        const g = groundY(f.x, f.zN) - f.r;
+        if (f.y >= g) { f.y = g; f.st = 'ground'; }
       } else {
         f.life -= dt;
         if (f.life <= 0) foods.splice(i, 1);
@@ -337,14 +569,14 @@
   function drawFoods(floating) {
     for (const f of foods) {
       if ((f.st === 'float') !== floating) continue;
+      const x = f.x + shiftX(f.zN), y = f.y + shiftY(f.zN);
       ctx.globalAlpha = f.st === 'ground' ? Math.min(1, f.life / 2) : 1;
-      ctx.fillStyle = '#b8642c';
+      const g = ctx.createRadialGradient(x - f.r * 0.35, y - f.r * 0.35, 0, x, y, f.r);
+      g.addColorStop(0, '#e8a060');
+      g.addColorStop(1, '#7a3c18');
+      ctx.fillStyle = g;
       ctx.beginPath();
-      ctx.arc(f.x, f.y, f.r, 0, TAU);
-      ctx.fill();
-      ctx.fillStyle = 'rgba(255,220,170,0.6)';
-      ctx.beginPath();
-      ctx.arc(f.x - f.r * 0.3, f.y - f.r * 0.3, f.r * 0.4, 0, TAU);
+      ctx.arc(x, y, f.r, 0, TAU);
       ctx.fill();
     }
     ctx.globalAlpha = 1;
@@ -355,11 +587,9 @@
   //   体は「背骨」を12個の点でつなげた3Dのひもとして動かし、
   //   ひれは1本1本の「ひれすじ（軟条）」を、重さと水の抵抗をもった
   //   やわらかいひもとして計算している（体の動きに遅れてなびく）。
+  //   体・ウロコ・ひれの膜は、上からの光の当たり方を計算して塗る。
   // =====================================================================
   const N = 12, ROOT = 3, K = 6;
-  let BL = 140;          // 体長（口先〜尾の付け根）の画面上の長さ
-  let DEPTH = 300;       // 水槽の奥行き
-  let FOC = 1200;        // 遠近感の強さ
 
   // 体の高さ・中心のずれ（体長に対する比率）。u=0 が口先、u=1 が尾の付け根
   const PU = [0, 0.06, 0.15, 0.3, 0.5, 0.7, 0.85, 1];
@@ -375,7 +605,7 @@
   const offAt = fi => prof(PO, fi / (N - 1));
   const wAt = fi => hAt(fi) * (0.62 - 0.25 * fi / (N - 1));
 
-  const vec = () => ({ x: 0, y: 0, z: 0 });
+  const vec = (x = 0, y = 0, z = 0) => ({ x, y, z });
   function norm(a) {
     const l = Math.hypot(a.x, a.y, a.z) || 1;
     a.x /= l; a.y /= l; a.z /= l;
@@ -384,11 +614,15 @@
   // a × (0,-1,0)
   function crossUp(a, o) { o.x = a.z; o.y = 0; o.z = -a.x; return o; }
 
+  // 光の向き（左上・少し手前から）と、光沢の計算用ベクトル
+  const LIGHT = norm(vec(-0.3, -1, -0.5));
+  const HALF = norm(vec(LIGHT.x, LIGHT.y, LIGHT.z - 1));
+
   const F = {
     P: vec(), yaw: 0, pitch: 0, speed: 0, k: 1,
     dirs: [], pts: [], fr: [],
     phase: 0, amp: 0.05, freq: 1.4,
-    pec: 0, pecF: 5,
+    pec: 0, pecF: 5, gill: 0,
     spread: 0.5, flare: 0, grav: 1,
     rays: [], ready: false
   };
@@ -397,6 +631,7 @@
     F.pts.push(vec());
     F.fr.push({ f: vec(), l: vec(), d: vec() });
   }
+  const fishZN = () => clamp(F.P.z / DEPTH + 0.5, 0, 1);
 
   // ---- ひれすじを作る ----
   function makeRays() {
@@ -404,9 +639,10 @@
       // すじ1本ごとに角度・曲がりを少し不ぞろいにする（自然に見せるため）
       const jit = side ? 0 : rand(-0.06, 0.06);
       F.rays.push({
-      fin, fi, av, side, a0: a0 + jit, a1: a1 + jit, len, curv: curv + (side ? 0 : rand(-0.035, 0.035)), web, split, ph: rand(0, TAU),
-      p: Array.from({ length: K + 1 }, () => ({ x: 0, y: 0, z: 0, px: 0, py: 0, pz: 0 })),
-      s: Array.from({ length: K + 1 }, () => ({ x: 0, y: 0 }))
+        fin, fi, av, side, a0: a0 + jit, a1: a1 + jit, len,
+        curv: curv + (side ? 0 : rand(-0.035, 0.035)), web, split, ph: rand(0, TAU),
+        p: Array.from({ length: K + 1 }, () => ({ x: 0, y: 0, z: 0, px: 0, py: 0, pz: 0 })),
+        s: Array.from({ length: K + 1 }, () => ({ x: 0, y: 0 }))
       });
     };
     // 尾びれ：半円より大きく広がる。クラウンテールはすじの先が2本に割れる
@@ -488,7 +724,7 @@
       const f = F.fr[i].f, n = F.pts[i - 1], o = F.pts[i];
       o.x = n.x - f.x * seg; o.y = n.y - f.y * seg; o.z = n.z - f.z * seg;
     }
-    F.k = FOC / (FOC + P.z);
+    F.k = depthK(fishZN());
   }
 
   // ---- ひれの物理（やわらかいひもとして計算） ----
@@ -508,6 +744,7 @@
   function stepFins(reset) {
     const g = BL * 0.0032 * F.grav;
     const fl = BL * (0.012 + Math.min(1.5, F.speed / BL) * 0.01);
+    const zN = fishZN();
     for (const r of F.rays) {
       const fr = rayBase(r, T);
       const p = r.p;
@@ -544,7 +781,7 @@
         const m = ell / (Math.hypot(dx, dy, dz) || 1);
         q.x = pr.x + dx * m; q.y = pr.y + dy * m; q.z = pr.z + dz * m;
         // 砂や水面を突き抜けない
-        const floor = sandY(q.x) - 2;
+        const floor = groundY(q.x, zN) - 2;
         if (q.y > floor) q.y = floor;
         const ceil = surfY(q.x) + 2;
         if (q.y < ceil) q.y = ceil;
@@ -557,6 +794,7 @@
   //  ・普段はゆっくり。数回尾を振って進み、ひれを広げたまま惰性ですべる
   //  ・止まっているときは胸びれを細かく動かしてホバリング（その場に浮く）
   //  ・ときどき辺りを見回したり、その場でくるっと向きを変える
+  //  ・水槽の手前〜奥も行き来する（水草の前や後ろを泳ぐ）
   //  ・ラビリンス器官で空気を吸うため、定期的に水面へ上がって息つぎ
   //  ・息つぎのあと、ときどき水面に泡を吹いて泡巣を作る
   //  ・エサは水面の下でねらいを定めて、すばやく食いつく
@@ -569,17 +807,19 @@
     tx: 0, ty: 0, tz: 0, hx: 0, hy: 0, hz: 0,
     faceYaw: 0, facePitch: 0, lookT: 1,
     airT: rand(18, 28), restT: rand(55, 90), flareCD: 2, followT: 0,
-    blowN: 0, food: null, cruise: 1
+    blowN: 0, food: null, cruise: 1, resting: false
   };
 
-  function bounds(mode) {
+  function bounds(mode, zOverride) {
     const s0 = 8 * S;
     const high = mode === 'air' || mode === 'gulp' || mode === 'nest' || mode === 'blow' ||
       mode === 'food' || mode === 'aim' || mode === 'strike';
     const low = mode === 'rest' || mode === 'food' || mode === 'aim' || mode === 'strike';
+    const zN = zOverride === undefined ? fishZN() : zOverride;
+    const k = depthK(zN);
     const y0 = s0 + (high ? 0.08 : 0.6) * BL;
-    const y1 = Math.max(y0, sandTop - (low ? 0.45 : 0.95) * BL);
-    return { x0: BL * 0.9, x1: Math.max(BL * 0.9, W - BL * 0.9), y0, y1, z0: -DEPTH / 2, z1: DEPTH / 2 };
+    const y1 = Math.max(y0, floorY(zN) - (low ? 0.5 : 0.95) * BL * k);
+    return { x0: BL * 0.9, x1: Math.max(BL * 0.9, W - BL * 0.9), y0, y1, z0: -DEPTH * 0.45, z1: DEPTH * 0.45 };
   }
 
   function setMode(m) {
@@ -593,20 +833,21 @@
       B.faceYaw = Math.cos(F.yaw) >= 0 ? rand(-0.4, 0.4) : Math.PI + rand(-0.4, 0.4);
       B.lookT = rand(0.8, 2);
     } else if (m === 'travel') {
-      const b = bounds(m);
+      B.tz = rand(-0.42, 0.42) * DEPTH;
+      const b = bounds(m, B.tz / DEPTH + 0.5);
       let tx = rand(b.x0, b.x1);
       for (let i = 0; i < 6 && Math.abs(tx - P.x) < BL * 1.5; i++) tx = rand(b.x0, b.x1);
       B.tx = tx;
       B.ty = b.y0 + (b.y1 - b.y0) * Math.pow(Math.random(), 1.4); // 上の方を泳ぐことが多い
-      B.tz = rand(-0.4, 0.4) * DEPTH;
       B.cruise = rand(0.7, 1.15);
     } else if (m === 'rest') {
-      const back = plants.filter(p => !p.front);
-      const p = back.length ? pick(back) : { fx: 0.5 };
-      const b = bounds(m);
+      const cand = plants.filter(p => p.zN > 0.3);
+      const p = cand.length ? pick(cand) : { fx: 0.5, zN: 0.5 };
+      const tzN = clamp(p.zN - 0.08, 0.06, 0.94);
+      const b = bounds(m, tzN);
       B.tx = clamp(p.fx * W + rand(-0.6, 0.6) * BL, b.x0, b.x1);
+      B.tz = (tzN - 0.5) * DEPTH;
       B.ty = b.y1;
-      B.tz = rand(0.05, 0.35) * DEPTH;
       B.t = rand(8, 15);
       B.resting = false;
     } else if (m === 'air') {
@@ -616,7 +857,7 @@
     } else if (m === 'gulp') {
       B.t = 0.35;
       const sn = snout();
-      ripples.push({ x: sn.x, y: surfY(sn.x) + 1, t: 0, size: 0.6 });
+      ripples.push({ x: sn.x, y: surfY(sn.x) + 1, t: 0, size: 0.6, zN: fishZN() });
     } else if (m === 'after') {
       const b = bounds('hover');
       B.tx = clamp(P.x + Math.cos(F.yaw) * BL * 1.1, b.x0, b.x1);
@@ -626,7 +867,7 @@
     } else if (m === 'nest') {
       B.tx = clamp(nestX(), BL, W - BL);
       B.ty = 8 * S + 0.25 * BL;
-      B.tz = -DEPTH * 0.2;
+      B.tz = (NEST_Z - 0.5) * DEPTH;
     } else if (m === 'blow') {
       B.blowN = 3 + ((Math.random() * 4) | 0);
       B.t = 0.5;
@@ -644,7 +885,7 @@
     }
   }
 
-  // 口先の位置（画面上）
+  // 口先の位置（画面上。視点のずれは含まない）
   const SN = { x: 0, y: 0 };
   function snout() {
     const p = F.pts[0], f = F.fr[0].f, P = F.P, k = F.k;
@@ -695,7 +936,7 @@
     const P = F.P;
     B.airT -= dt; B.restT -= dt; B.flareCD -= dt;
     const food = nearestFood();
-    const pointerOn = ptr.on && simT - ptr.t < 2.5 && ptr.y > 8 * S && ptr.y < sandTop;
+    const pointerOn = ptr.on && simT - ptr.t < 2.5 && ptr.y > 8 * S && ptr.y < floorBack;
     const busy = ['air', 'gulp', 'nest', 'blow', 'strike', 'aim'].includes(B.mode);
     if (!busy) {
       if (B.airT < 0) setMode('air');
@@ -765,7 +1006,7 @@
           // 古い空気をエラから出す
           const gp = gillPoint();
           for (let i = 0; i < 2; i++) {
-            bubbles.push({ x: gp.x + rand(-2, 2), y: gp.y + i * 5 * S, r: rand(1.5, 2.6) * S, vy: rand(40, 60) * S, ph: rand(0, TAU), once: true });
+            bubbles.push({ x: gp.x + rand(-2, 2), y: gp.y + i * 5 * S, r: rand(1.5, 2.6) * S, vy: rand(40, 60) * S, ph: rand(0, TAU), once: true, zN: fishZN() });
           }
           B.airT = rand(35, 70);
           setMode(Math.random() < 0.5 ? 'nest' : 'after');
@@ -797,7 +1038,7 @@
         if (B.t < 0) {
           const sn = snout();
           addNestBubbles(sn.x, 2 + ((Math.random() * 3) | 0));
-          ripples.push({ x: sn.x, y: surfY(sn.x) + 1, t: 0, size: 0.4 });
+          ripples.push({ x: sn.x, y: surfY(sn.x) + 1, t: 0, size: 0.4, zN: NEST_Z });
           B.blowN--;
           B.t = rand(0.45, 0.8);
           if (B.blowN <= 0) setMode('after');
@@ -810,7 +1051,7 @@
         const fx = Math.sign(food.x - P.x) || 1;
         // 浮いているエサは真下から、沈んだエサは斜め上からねらう
         const ty = food.st === 'float' ? food.y + BL * 0.55 : food.y - BL * (food.st === 'ground' ? 0.25 : 0);
-        const d = steer(food.x - fx * BL * 0.35, ty, P.z * 0.98, dt, maxP);
+        const d = steer(food.x - fx * BL * 0.35, ty, (food.zN - 0.5) * DEPTH, dt, maxP);
         sd = BL * 1.1 * Math.min(1, d / BL + 0.3);
         burst = true;
         spreadT = 0.4;
@@ -822,7 +1063,7 @@
         const f = B.food;
         if (!f || !foods.includes(f)) { setMode('hover'); break; }
         hold(dt);
-        steer(f.x, f.y, P.z, dt, 0.9, true);
+        steer(f.x, f.y, (f.zN - 0.5) * DEPTH, dt, 0.9, true);
         spreadT = 0.55;
         B.t -= dt;
         if (B.t < 0) setMode('strike');
@@ -831,14 +1072,14 @@
       case 'strike': {
         const f = B.food;
         if (!f || !foods.includes(f)) { setMode('after'); break; }
-        steer(f.x, f.y, P.z, dt, 0.9, true);
+        steer(f.x, f.y, (f.zN - 0.5) * DEPTH, dt, 0.9, true);
         sd = BL * 3.2;
         strike = true;
         spreadT = 0.1;
         const sn = snout();
         if (Math.hypot(sn.x - f.x, sn.y - f.y) < BL * 0.1 * F.k + f.r) {
           foods.splice(foods.indexOf(f), 1);
-          if (f.st === 'float') ripples.push({ x: f.x, y: surfY(f.x) + 1, t: 0, size: 0.7 });
+          if (f.st === 'float') ripples.push({ x: f.x, y: surfY(f.x) + 1, t: 0, size: 0.7, zN: f.zN });
           setMode('after');
           B.t = 0.8;
         } else {
@@ -849,8 +1090,11 @@
       }
       case 'follow': {
         if (!pointerOn) { setMode('hover'); break; }
-        const side = Math.sign(P.x - ptr.x) || 1;
-        const tx = ptr.x + side * BL * 0.65, ty = ptr.y, tz = -DEPTH * 0.45;
+        const tz = -DEPTH * 0.42;
+        const zf = tz / DEPTH + 0.5;
+        const px = ptr.x - shiftX(zf), py = ptr.y - shiftY(zf);
+        const side = Math.sign(P.x - px) || 1;
+        const tx = px + side * BL * 0.65, ty = py;
         const dx = tx - P.x, dy = ty - P.y, dz = tz - P.z;
         const d = Math.hypot(dx, dy, dz);
         if (d > BL * 0.45) {
@@ -862,8 +1106,8 @@
           // ガラスの向こうの指をじっと見る
           B.hx = tx; B.hy = ty; B.hz = tz;
           hold(dt);
-          const gx = ptr.x - P.x, gz = -DEPTH * 0.5 - BL * 1.2 - P.z;
-          turnTo(Math.atan2(gz * 0.35, gx), clamp(Math.atan2(ptr.y - P.y, Math.abs(gx) + BL), -0.4, 0.4), dt);
+          const gx = px - P.x, gz = -DEPTH * 0.5 - BL * 1.2 - P.z;
+          turnTo(Math.atan2(gz * 0.35, gx), clamp(Math.atan2(py - P.y, Math.abs(gx) + BL), -0.4, 0.4), dt);
           spreadT = 0.62;
           B.followT += dt;
           if (B.followT > 2.2 && B.flareCD < 0 && Math.random() < dt * 0.6) setMode('flare');
@@ -873,7 +1117,7 @@
       case 'flare': {
         // フレアリング：エラぶたを開き、ひれを全開にして威嚇
         hold(dt);
-        const gx = ptr.x - P.x;
+        const gx = ptr.x - shiftX(fishZN()) - P.x;
         turnTo(Math.atan2((-DEPTH * 0.5 - BL - P.z) * 0.25, gx), 0, dt);
         spreadT = 1;
         pecF = 7;
@@ -904,6 +1148,7 @@
     F.phase += TAU * F.freq * dt;
     F.pecF += (pecF - F.pecF) * Math.min(1, dt * 3);
     F.pec += TAU * F.pecF * dt;
+    F.gill += TAU * (B.mode === 'rest' ? 0.8 : 1.4) * dt;
     F.spread += (spreadT - F.spread) * Math.min(1, dt * (B.mode === 'flare' ? 6 : 2.2));
     F.flare += ((B.mode === 'flare' ? 1 : 0) - F.flare) * Math.min(1, dt * 5);
     const movingG = lerp(1, 0.55, clamp(F.speed / BL, 0, 1));
@@ -918,7 +1163,7 @@
     P.x = clamp(P.x, b.x0, b.x1);
     P.y = clamp(P.y, b.y0, b.y1);
     P.z = clamp(P.z, b.z0, b.z1);
-    // ホバリング以外で水平に近いときは、体を水平に戻していく
+    // 移動中は体を水平に戻していく
     if (B.mode === 'travel' || B.mode === 'after') F.pitch *= 1 - Math.min(1, dt * 0.6);
   }
 
@@ -971,18 +1216,33 @@
 
   // 体表の点（fi: 背骨上の位置, v: -1=腹 〜 1=背）
   const SP = { x: 0, y: 0, fx: 0, fy: 0, dx: 0, dy: 0, h: 0 };
-  function surfPt(fi, v, side) {
+  function surfPt(fi, v) {
     const i0 = Math.min(N - 2, Math.max(0, Math.floor(fi))), a = clamp(fi - i0, 0, 1);
     const A = SC[i0], Bq = SC[i0 + 1];
     const h = lerp(A.h, Bq.h, a), w = lerp(A.w, Bq.w, a);
     const vv = clamp(v, -1, 1);
-    const ww = w * Math.sqrt(1 - vv * vv) * (side === undefined ? nearSign : side);
+    const ww = w * Math.sqrt(1 - vv * vv) * nearSign;
     SP.dx = lerp(A.dx, Bq.dx, a); SP.dy = lerp(A.dy, Bq.dy, a);
     SP.fx = lerp(A.fx, Bq.fx, a); SP.fy = lerp(A.fy, Bq.fy, a);
     SP.x = lerp(A.cx, Bq.cx, a) + SP.dx * v * h + lerp(A.lx, Bq.lx, a) * ww;
     SP.y = lerp(A.cy, Bq.cy, a) + SP.dy * v * h + lerp(A.ly, Bq.ly, a) * ww;
     SP.h = h;
     return SP;
+  }
+
+  // 体表の向き（法線）と光の計算。v: -1=腹 〜 1=背
+  const NV = vec();
+  function lightAt(fi, v) {
+    const fr = F.fr[clamp(Math.round(fi), 0, N - 1)];
+    const h = hAt(fi), w = wAt(fi);
+    const vv = clamp(v, -0.999, 0.999);
+    const a = vv / h, b = (Math.sqrt(1 - vv * vv) / w) * nearSign;
+    NV.x = fr.d.x * a + fr.l.x * b; NV.y = fr.d.y * a + fr.l.y * b; NV.z = fr.d.z * a + fr.l.z * b;
+    norm(NV);
+    const diff = Math.max(0, NV.x * LIGHT.x + NV.y * LIGHT.y + NV.z * LIGHT.z);
+    const sp = Math.max(0, NV.x * HALF.x + NV.y * HALF.y + NV.z * HALF.z);
+    const rim = Math.pow(1 - Math.abs(NV.z), 3);
+    return { diff, spec: Math.pow(sp, 28), rim };
   }
 
   function gillPoint() {
@@ -1045,6 +1305,36 @@
     return { x: lerp(A.x, Bq.x, a), y: lerp(A.y, Bq.y, a), j };
   }
 
+  // 膜の一区画（すじ i と i+1 の間、根元側 j0〜j1）の形を作る
+  function webQuad(A, Bs, j0, j1, wa, wb) {
+    ctx.moveTo(A[j0].x, A[j0].y);
+    for (let j = j0 + 1; j <= j1; j++) ctx.lineTo(A[j].x, A[j].y);
+    if (wa) {
+      ctx.lineTo(wa.x, wa.y);
+      // 膜のふちはすじとすじの間で根元側にへこむ（クラウンテールの特徴）
+      const ja = Math.max(0, wa.j - 1), jb = Math.max(0, wb.j - 1);
+      const mx = (wa.x + wb.x) / 2, my = (wa.y + wb.y) / 2;
+      const ix = (A[ja].x + Bs[jb].x) / 2, iy = (A[ja].y + Bs[jb].y) / 2;
+      ctx.quadraticCurveTo(lerp(mx, ix, 0.55), lerp(my, iy, 0.55), wb.x, wb.y);
+      for (let j = wb.j; j >= j0; j--) ctx.lineTo(Bs[j].x, Bs[j].y);
+    } else {
+      for (let j = j1; j >= j0; j--) ctx.lineTo(Bs[j].x, Bs[j].y);
+    }
+    ctx.closePath();
+  }
+
+  // 膜の区画の向きから明るさを決める（波打つと明暗が動く）
+  function webLight(ra, rb, j0, j1) {
+    const a0 = ra.p[j0], a1 = ra.p[j1], b0 = rb.p[j0];
+    const ex = a1.x - a0.x, ey = a1.y - a0.y, ez = a1.z - a0.z;
+    const fx = b0.x - a0.x, fy = b0.y - a0.y, fz = b0.z - a0.z;
+    const nx = ey * fz - ez * fy, ny = ez * fx - ex * fz, nz = ex * fy - ey * fx;
+    const l = Math.hypot(nx, ny, nz) || 1;
+    const d = Math.abs((nx * LIGHT.x + ny * LIGHT.y + nz * LIGHT.z) / l);
+    const s = Math.pow(Math.abs((nx * HALF.x + ny * HALF.y + nz * HALF.z) / l), 18);
+    return { d, s };
+  }
+
   function drawFin(list, maxLen, dim) {
     if (!list || !list.length) return;
     projectRays(list);
@@ -1063,20 +1353,34 @@
     grad.addColorStop(1, `rgba(90,170,255,${0.55 * dim})`);
     ctx.fillStyle = grad;
     ctx.beginPath();
-    for (let i = 0; i < list.length - 1; i++) {
-      const A = list[i].s, Bs = list[i + 1].s, wa = wp[i], wb = wp[i + 1];
-      ctx.moveTo(A[0].x, A[0].y);
-      for (let j = 1; j <= wa.j; j++) ctx.lineTo(A[j].x, A[j].y);
-      ctx.lineTo(wa.x, wa.y);
-      // 膜のふちはすじとすじの間で根元側にへこむ（クラウンテールの特徴）
-      const ja = Math.max(0, wa.j - 1), jb = Math.max(0, wb.j - 1);
-      const mx = (wa.x + wb.x) / 2, my = (wa.y + wb.y) / 2;
-      const ix = (A[ja].x + Bs[jb].x) / 2, iy = (A[ja].y + Bs[jb].y) / 2;
-      ctx.quadraticCurveTo(lerp(mx, ix, 0.55), lerp(my, iy, 0.55), wb.x, wb.y);
-      for (let j = wb.j; j >= 0; j--) ctx.lineTo(Bs[j].x, Bs[j].y);
-      ctx.closePath();
-    }
+    for (let i = 0; i < list.length - 1; i++) webQuad(list[i].s, list[i + 1].s, 0, wp[i].j, wp[i], wp[i + 1]);
     ctx.fill();
+
+    // 光の当たり方による明暗（根元側・先側の2区画ずつ）
+    for (let i = 0; i < list.length - 1; i++) {
+      const ra = list[i], rb = list[i + 1];
+      const wj = Math.min(wp[i].j, wp[i + 1].j);
+      const mid = Math.max(1, Math.floor(wj / 2));
+      for (let part = 0; part < 2; part++) {
+        const j0 = part ? mid : 0, j1 = part ? wj : mid;
+        if (j1 <= j0) continue;
+        const L = webLight(ra, rb, j0, j1);
+        ctx.beginPath();
+        if (part) webQuad(ra.s, rb.s, j0, j1, wp[i], wp[i + 1]);
+        else webQuad(ra.s, rb.s, j0, j1, null, null);
+        if (L.d < 0.5) {
+          ctx.fillStyle = `rgba(2,8,40,${((0.5 - L.d) * 1.15 * dim).toFixed(3)})`;
+          ctx.fill();
+        } else {
+          ctx.fillStyle = `rgba(150,210,255,${((L.d - 0.5) * 0.75 * dim).toFixed(3)})`;
+          ctx.fill();
+        }
+        if (L.s > 0.04) {
+          ctx.fillStyle = `rgba(225,242,255,${(L.s * 0.45 * dim).toFixed(3)})`;
+          ctx.fill();
+        }
+      }
+    }
 
     // 膜のすじ模様
     ctx.strokeStyle = `rgba(140,200,255,${0.3 * dim})`;
@@ -1161,7 +1465,7 @@
     }
     for (const t of tips) ctx.lineTo(t[0], t[1]);
     ctx.closePath();
-    ctx.fillStyle = 'rgba(160,205,255,0.2)';
+    ctx.fillStyle = `rgba(160,205,255,${(0.14 + 0.1 * (beat * 0.5 + 0.5)).toFixed(3)})`;
     ctx.fill();
     ctx.strokeStyle = 'rgba(180,220,255,0.35)';
     ctx.lineWidth = 0.8;
@@ -1171,17 +1475,17 @@
   }
 
   // ウロコ（ドラゴンスケール：厚みのある金属光沢のウロコ）
-  const SCALE_COLS = ['#12307f', '#1a44b0', '#2459d6', '#336ff0', '#4f8bff', '#7aaeff', '#a8ccff'];
+  const SCALE_COLS = ['#081649', '#0d226c', '#132f8e', '#1a3eae', '#214fcb', '#2b62e2', '#3b78f2', '#5591ff', '#7eb0ff', '#b7d4ff', '#e6f1ff'];
   const headSpots = Array.from({ length: 16 }, () => ({ fi: rand(0.4, 2.6), v: rand(-0.6, 0.75), r: rand(0.008, 0.016), c: Math.random() }));
 
   function drawScales() {
     if (vis < 0.12) return;
     const k = F.k;
-    ctx.globalAlpha = Math.min(1, (vis - 0.12) * 3);
+    ctx.globalAlpha = Math.min(1, (vis - 0.12) * 3) * 0.82;
     const r = BL * 0.07 * k;
     const colStep = 0.68, rowStep = 0.27;
     ctx.lineWidth = Math.max(0.6, 0.9 * k * BL / 140);
-    ctx.strokeStyle = 'rgba(5,14,50,0.85)';
+    ctx.strokeStyle = 'rgba(3,9,38,0.85)';
     let col = 0;
     for (let fi = N - 1.3; fi >= 2.45; fi -= colStep, col++) {
       const vOff = (col % 2) * rowStep * 0.5;
@@ -1192,14 +1496,16 @@
         const sq = Math.max(0.3, Math.sqrt(1 - v * v));
         const dl = Math.hypot(p.dx, p.dy) || 1;
         const bx = (p.dx / dl) * r * 0.62 * sq, by = (p.dy / dl) * r * 0.62 * sq;
-        // 光の当たり方でキラキラ変わる
-        const sh = Math.sin(fi * 1.7 + v * 4 + simT * 0.9 + F.yaw * 3) * 0.5 + 0.5;
-        const idx = clamp(Math.round(sh * 3.2 + (v + 0.2) * 1.6 + F.flare * 0.8), 0, SCALE_COLS.length - 1);
-        ctx.fillStyle = SCALE_COLS[idx];
+        const px = p.x, py = p.y;
+        // 光の当たり方＋見る角度でキラキラ変わる金属光沢
+        const Lt = lightAt(fi, v);
+        const sparkle = Math.sin(fi * 1.7 + v * 4 + simT * 0.9 + F.yaw * 3);
+        const level = 0.1 + 0.62 * Lt.diff + 0.9 * Lt.spec + 0.1 * sparkle + Lt.rim * 0.15 + F.flare * 0.1;
+        ctx.fillStyle = SCALE_COLS[clamp(Math.round(level * 10), 0, SCALE_COLS.length - 1)];
         ctx.beginPath();
-        ctx.moveTo(p.x - bx, p.y - by);
-        ctx.quadraticCurveTo(p.x - bx - ax * 1.1, p.y - by - ay * 1.1, p.x - ax, p.y - ay);
-        ctx.quadraticCurveTo(p.x + bx - ax * 1.1, p.y + by - ay * 1.1, p.x + bx, p.y + by);
+        ctx.moveTo(px - bx, py - by);
+        ctx.quadraticCurveTo(px - bx - ax * 1.1, py - by - ay * 1.1, px - ax, py - ay);
+        ctx.quadraticCurveTo(px + bx - ax * 1.1, py + by - ay * 1.1, px + bx, py + by);
         ctx.closePath();
         ctx.fill();
         ctx.stroke();
@@ -1208,35 +1514,52 @@
     ctx.globalAlpha = 1;
   }
 
+  // 体の陰影：背骨の区間ごとに、上から下へ光の当たり方を計算したグラデーションで塗る
+  const BODY_BASE = [26, 62, 196], HEAD_BASE = [7, 13, 42];
+  const STOPS = [0, 0.12, 0.25, 0.4, 0.55, 0.7, 0.85, 1];
+  function shadeBody() {
+    for (let i = 0; i < N - 1; i++) {
+      const A = SC[i], Bq = SC[i + 1];
+      const mtx = (A.tx + Bq.tx) / 2, mty = (A.ty + Bq.ty) / 2;
+      const mbx = (A.bx + Bq.bx) / 2, mby = (A.by + Bq.by) / 2;
+      if (Math.hypot(mtx - mbx, mty - mby) < 1) continue;
+      const fi = i + 0.5, u = fi / (N - 1);
+      const base = mixRgb(HEAD_BASE, BODY_BASE, clamp((u - 0.1) / 0.18, 0, 1));
+      const g = ctx.createLinearGradient(mtx, mty, mbx, mby);
+      for (const s of STOPS) {
+        const L = lightAt(fi, 1 - 2 * s);
+        const lit = 0.18 + 0.95 * L.diff;
+        const c = [
+          base[0] * lit + L.spec * 170 + L.rim * 30,
+          base[1] * lit + L.spec * 200 + L.rim * 70,
+          base[2] * lit + L.spec * 230 + L.rim * 150
+        ];
+        g.addColorStop(s, rgbStr([Math.min(255, c[0]), Math.min(255, c[1]), Math.min(255, c[2])]));
+      }
+      ctx.fillStyle = g;
+      // 区間を少し広めに塗って継ぎ目が出ないようにする（はみ出しは体の形で切り取られる）
+      const ox = (mtx - mbx) * 0.2, oy = (mty - mby) * 0.2;
+      const ex = i < N - 2 ? 0.35 : 0.8;
+      const sx = i === 0 ? -0.6 : 0;
+      ctx.beginPath();
+      ctx.moveTo(A.tx + (A.tx - Bq.tx) * -sx + ox, A.ty + (A.ty - Bq.ty) * -sx + oy);
+      ctx.lineTo(Bq.tx + (Bq.tx - A.tx) * ex + ox, Bq.ty + (Bq.ty - A.ty) * ex + oy);
+      ctx.lineTo(Bq.bx + (Bq.bx - A.bx) * ex - ox, Bq.by + (Bq.by - A.by) * ex - oy);
+      ctx.lineTo(A.bx + (A.bx - Bq.bx) * -sx - ox, A.by + (A.by - Bq.by) * -sx - oy);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+
   function drawBody() {
     const { path, outline } = bodyPath();
-    const m = SC[5];
-    const dl = Math.hypot(m.dx, m.dy) || 1;
-    const nx = m.dx / dl, ny = m.dy / dl, hm = BL * 0.15 * F.k;
-    const g = ctx.createLinearGradient(m.cx + nx * hm, m.cy + ny * hm, m.cx - nx * hm, m.cy - ny * hm);
-    g.addColorStop(0, '#081640');
-    g.addColorStop(0.35, '#1a3aa8');
-    g.addColorStop(0.7, '#2a5ad8');
-    g.addColorStop(1, '#122a78');
-    ctx.fillStyle = g;
+    ctx.fillStyle = '#16348f';
     ctx.fill(path);
 
     ctx.save();
     ctx.clip(path);
+    shadeBody();
     drawScales();
-    // 頭は暗い色（写真の個体の特徴）
-    const h0 = SC[0], h3 = SC[ROOT];
-    if (Math.hypot(h3.cx - h0.cx, h3.cy - h0.cy) > 1) {
-      const hg = ctx.createLinearGradient(h0.cx, h0.cy, h3.cx + (h3.cx - h0.cx) * 0.25, h3.cy + (h3.cy - h0.cy) * 0.25);
-      hg.addColorStop(0, 'rgba(4,8,28,0.92)');
-      hg.addColorStop(0.7, 'rgba(6,14,50,0.6)');
-      hg.addColorStop(1, 'rgba(6,14,50,0)');
-      ctx.fillStyle = hg;
-      ctx.fillRect(Math.min(h0.cx, h3.cx) - BL, Math.min(h0.cy, h3.cy) - BL, Math.abs(h3.cx - h0.cx) + BL * 2, Math.abs(h3.cy - h0.cy) + BL * 2);
-    } else {
-      ctx.fillStyle = 'rgba(4,8,28,0.55)';
-      ctx.fill(path);
-    }
     // 頭の青い斑点
     if (vis > 0.12) {
       ctx.globalAlpha = Math.min(1, (vis - 0.12) * 3);
@@ -1249,13 +1572,23 @@
       }
       ctx.globalAlpha = 1;
     }
-    ctx.restore();
-
+    // 水面からの光の網目が体の上をすべっていく
+    const fr = causFrames();
+    if (fr) {
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = 0.22 * clamp(1.2 - F.P.y / floorBack, 0.25, 1);
+      const sc = 1.6 * S;
+      fillCaustic(ctx, patMain, fr, sc, sc, 0, 0, F.P.x - BL * 1.5, F.P.y - BL, BL * 3, BL * 2);
+      ctx.globalAlpha = 1;
+      ctx.globalCompositeOperation = 'source-over';
+    }
+    // ふちを暗くして丸みを出す
     if (vis > 0.2) {
-      ctx.strokeStyle = `rgba(0,5,25,${0.45 * Math.min(1, (vis - 0.2) * 3)})`;
-      ctx.lineWidth = 1;
+      ctx.strokeStyle = `rgba(0,4,24,${(0.45 * Math.min(1, (vis - 0.2) * 3)).toFixed(3)})`;
+      ctx.lineWidth = BL * 0.035 * F.k;
       ctx.stroke(outline);
     }
+    ctx.restore();
   }
 
   function drawHeadDetails() {
@@ -1270,27 +1603,37 @@
       const dl = Math.hypot(base.dx, base.dy) || 1, fl = Math.hypot(base.fx, base.fy) || 1;
       const downX = -(base.dx / dl) * BL * 0.2 * k * F.flare, downY = -(base.dy / dl) * BL * 0.2 * k * F.flare;
       const backX = -(base.fx / fl) * BL * 0.14 * k * F.flare, backY = -(base.fy / fl) * BL * 0.14 * k * F.flare;
-      ctx.fillStyle = `rgba(30,6,14,${0.92 * F.flare})`;
+      const end = surfPt(2.7, -0.55);
+      const ex0 = end.x, ey0 = end.y;
+      const g = ctx.createRadialGradient(bx, by, 0, bx, by, BL * 0.25 * k);
+      g.addColorStop(0, `rgba(70,12,28,${0.95 * F.flare})`);
+      g.addColorStop(1, `rgba(18,4,10,${0.95 * F.flare})`);
+      ctx.fillStyle = g;
       ctx.beginPath();
       ctx.moveTo(t0x, t0y);
       ctx.quadraticCurveTo(bx + downX * 1.3 - backX * 0.4, by + downY * 1.3 - backY * 0.4, bx + downX + backX, by + downY + backY);
-      ctx.quadraticCurveTo(bx + backX * 1.4, by + backY * 1.4, surfPt(2.7, -0.55).x, SP.y);
+      ctx.quadraticCurveTo(bx + backX * 1.4, by + backY * 1.4, ex0, ey0);
       ctx.closePath();
       ctx.fill();
-      ctx.strokeStyle = `rgba(120,30,50,${0.6 * F.flare})`;
+      ctx.strokeStyle = `rgba(140,40,60,${0.6 * F.flare})`;
       ctx.lineWidth = 1;
       ctx.stroke();
     }
     if (a > 0) {
+      // エラぶたのふち（呼吸でわずかに動く）
+      const br = Math.sin(F.gill) * 0.06;
       ctx.globalAlpha = a;
       const p1 = surfPt(2.0, 0.55), x1 = p1.x, y1 = p1.y;
-      const p2 = surfPt(2.75 + F.flare * 0.35, -0.1), x2 = p2.x, y2 = p2.y;
+      const p2 = surfPt(2.75 + F.flare * 0.35 + br, -0.1), x2 = p2.x, y2 = p2.y;
       const p3 = surfPt(2.1 + F.flare * 0.2, -0.85);
-      ctx.strokeStyle = `rgba(120,175,255,${0.55 + F.flare * 0.3})`;
-      ctx.lineWidth = (1.2 + F.flare) * k * BL / 140;
+      ctx.strokeStyle = 'rgba(2,6,25,0.7)';
+      ctx.lineWidth = (2.4 + F.flare) * k * BL / 140;
       ctx.beginPath();
       ctx.moveTo(x1, y1);
       ctx.quadraticCurveTo(x2, y2, p3.x, p3.y);
+      ctx.stroke();
+      ctx.strokeStyle = `rgba(120,175,255,${0.5 + F.flare * 0.3})`;
+      ctx.lineWidth = (1.1 + F.flare) * k * BL / 140;
       ctx.stroke();
       ctx.globalAlpha = 1;
     }
@@ -1304,7 +1647,7 @@
     ctx.lineTo(sx - s0.fx * BL * 0.05 + s0.dx * BL * 0.012, sy - s0.fy * BL * 0.05 + s0.dy * BL * 0.012);
     ctx.stroke();
 
-    // 目
+    // 目（丸みとツヤのある目）
     const e = surfPt(0.85, 0.32);
     const ex = e.x, ey = e.y;
     const r = BL * 0.043 * k;
@@ -1314,26 +1657,54 @@
     ctx.translate(ex, ey);
     ctx.rotate(ang);
     ctx.scale(sq, 1);
-    ctx.fillStyle = '#16244f';
-    ctx.beginPath(); ctx.arc(0, 0, r, 0, TAU); ctx.fill();
-    ctx.fillStyle = '#8a6a2c';
-    ctx.beginPath(); ctx.arc(0, 0, r * 0.78, 0, TAU); ctx.fill();
-    ctx.fillStyle = '#030303';
+    ctx.fillStyle = '#0c1640';
+    ctx.beginPath(); ctx.arc(0, 0, r * 1.08, 0, TAU); ctx.fill();
+    const ig = ctx.createRadialGradient(-r * 0.2, -r * 0.3, r * 0.1, 0, 0, r * 0.8);
+    ig.addColorStop(0, '#d8b260');
+    ig.addColorStop(0.6, '#8a6a2c');
+    ig.addColorStop(1, '#3a2a10');
+    ctx.fillStyle = ig;
+    ctx.beginPath(); ctx.arc(0, 0, r * 0.8, 0, TAU); ctx.fill();
+    ctx.fillStyle = '#020202';
     ctx.beginPath(); ctx.arc(r * 0.06, 0, r * 0.55, 0, TAU); ctx.fill();
     ctx.restore();
-    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.fillStyle = 'rgba(255,255,255,0.9)';
     ctx.beginPath();
-    ctx.arc(ex - r * 0.25, ey - r * 0.3, r * 0.18, 0, TAU);
+    ctx.ellipse(ex - r * 0.28, ey - r * 0.32, r * 0.22, r * 0.14, -0.5, 0, TAU);
     ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.35)';
+    ctx.beginPath();
+    ctx.arc(ex + r * 0.3, ey + r * 0.3, r * 0.08, 0, TAU);
+    ctx.fill();
+  }
+
+  // 底に落ちる影（高いところにいるほど薄く大きくぼやける）
+  function drawShadow() {
+    const zN = fishZN();
+    const gy = floorY(zN);
+    const hgt = clamp((gy - F.P.y) / (gy - 8 * S), 0, 1);
+    const k = F.k;
+    const rx = BL * k * (0.75 + hgt * 0.6);
+    const a = 0.32 * (1 - hgt * 0.75);
+    const g = ctx.createRadialGradient(0, 0, 0, 0, 0, rx);
+    g.addColorStop(0, `rgba(0,12,24,${a.toFixed(3)})`);
+    g.addColorStop(1, 'rgba(0,12,24,0)');
+    ctx.save();
+    ctx.translate(F.P.x, gy);
+    ctx.scale(1, 0.16);
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(0, 0, rx, 0, TAU);
+    ctx.fill();
+    ctx.restore();
   }
 
   function drawBetta() {
     computeScreen();
     // 腹びれは左右1本ずつ。奥側を先に描く
-    const nearSide = nearSign;
-    const ventFar = nearSide > 0 ? 'ventralB' : 'ventralA';
-    const ventNear = nearSide > 0 ? 'ventralA' : 'ventralB';
-    drawFin(finGroups[ventFar], 0.55, 0.8);
+    const ventFar = nearSign > 0 ? 'ventralB' : 'ventralA';
+    const ventNear = nearSign > 0 ? 'ventralA' : 'ventralB';
+    drawFin(finGroups[ventFar], 0.55, 0.75);
     drawFin(finGroups.anal, 0.9, 1);
     drawFin(finGroups.dorsal, 0.8, 1);
     drawFin(finGroups.caudal, 1.05, 1);
@@ -1343,6 +1714,33 @@
     drawPectoral();
   }
 
+  function drawFishLayer() {
+    const zN = fishZN();
+    ctx.save();
+    ctx.translate(shiftX(zN), shiftY(zN));
+    drawShadow();
+    drawBetta();
+    ctx.restore();
+  }
+
+  // 周辺を少し暗く（写真のような奥行き感）
+  // （なめらかな変化なので、小さく作って引き伸ばす）
+  const vigC = document.createElement('canvas');
+  function bakeVignette() {
+    vigC.width = Math.max(1, Math.ceil(W / 8));
+    vigC.height = Math.max(1, Math.ceil(H / 8));
+    const g = vigC.getContext('2d');
+    g.setTransform(1 / 8, 0, 0, 1 / 8, 0, 0);
+    const gr = g.createRadialGradient(W / 2, H * 0.45, Math.min(W, H) * 0.35, W / 2, H * 0.45, Math.hypot(W, H) * 0.62);
+    gr.addColorStop(0, 'rgba(0,10,25,0)');
+    gr.addColorStop(1, 'rgba(0,10,25,0.45)');
+    g.fillStyle = gr;
+    g.fillRect(0, 0, W, H);
+  }
+  function drawVignette() {
+    ctx.drawImage(vigC, 0, 0, W, H);
+  }
+
   // ---------------- 画面サイズ ----------------
   function resize() {
     DPR = Math.min(window.devicePixelRatio || 1, 2);
@@ -1350,22 +1748,21 @@
     H = window.innerHeight;
     cv.width = Math.round(W * DPR);
     cv.height = Math.round(H * DPR);
-    bg.width = cv.width;
-    bg.height = cv.height;
     S = clamp(Math.min(W, H) / 800, 0.55, 1.4);
-    sandTop = H - Math.max(40, H * 0.12);
+    floorBack = H - Math.max(70, H * 0.22);
+    floorFront = H - Math.max(4, H * 0.01);
     BL = clamp(Math.min(W, H) * 0.2, 70, 200);
     DEPTH = Math.min(W, H) * 0.4;
-    FOC = DEPTH * 4;
-    drawBackground();
+    FOC = DEPTH * 2.2;
+    bakeWall();
+    bakeFloor();
+    bakeVignette();
     for (const f of foods) f.r = BL * 0.022;
     if (F.ready) {
       const b = bounds(B.mode);
       F.P.x = clamp(F.P.x, b.x0, b.x1);
       F.P.y = clamp(F.P.y, b.y0, b.y1);
       F.P.z = clamp(F.P.z, b.z0, b.z1);
-      B.hx = clamp(B.hx, b.x0, b.x1);
-      B.hy = clamp(B.hy, b.y0, b.y1);
       updateBody(0);
       stepFins(true);
       setMode('hover');
@@ -1414,8 +1811,9 @@
     bubbles.push(b);
   }
   {
-    const b = bounds('hover');
-    F.P.x = W * 0.45; F.P.y = lerp(b.y0, b.y1, 0.4); F.P.z = 0;
+    F.P.z = 0;
+    const b = bounds('hover', 0.5);
+    F.P.x = W * 0.45; F.P.y = lerp(b.y0, b.y1, 0.4);
     F.yaw = Math.random() < 0.5 ? 0 : Math.PI;
     for (const d of F.dirs) { d.x = Math.cos(F.yaw); d.y = 0; d.z = Math.sin(F.yaw); }
     updateBody(0);
@@ -1430,6 +1828,9 @@
   function frame(now) {
     const dt = Math.min(0.05, (now - last) / 1000); // タブ復帰時などの大きな飛びを防ぐ
     last = now;
+    // 光の網目は起動直後に少しずつ作る（一度に作ると最初が重くなるため）
+    if (caus.length < CF) { caus.push(genCaustic(caus.length)); if (caus.length < CF) caus.push(genCaustic(caus.length)); }
+
     acc += dt;
     // 物理は1/60秒きざみで計算（画面の更新頻度が違っても同じ動きになる）
     let n = 0;
@@ -1446,18 +1847,36 @@
     }
     if (n === 4) acc = 0;
 
+    // 視点をマウスの位置へゆっくり寄せる
+    const camOn = ptr.on && simT - ptr.t < 6;
+    const camTX = camOn ? (ptr.x / W - 0.5) * 24 : 0, camTY = camOn ? (ptr.y / H - 0.5) * 12 : 0;
+    cam.x += (camTX - cam.x) * Math.min(1, dt * 2);
+    cam.y += (camTY - cam.y) * Math.min(1, dt * 2);
+
     ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-    ctx.drawImage(bg, 0, 0, W, H);
+    ctx.drawImage(wallC, -M + shiftX(1), -M + shiftY(1), W + 2 * M, H + 2 * M);
+    drawFloor();
+    drawFloorCaustics();
     drawRays(simT);
-    drawPlants(simT, false);
-    drawFoods(false);
-    drawBetta();
-    drawBubbleSet(bubbles, simT, true);
-    drawPlants(simT, true);
+    drawBubbleSet(bubbles.filter(b => !b.once), simT, true);
+    // 奥にあるものから順に描く（ベタは水草の前にも後ろにも行ける）
+    const fz = fishZN();
+    let fishDone = false;
+    for (const p of plants) {
+      if (!fishDone && p.zN < fz) {
+        drawFoods(false);
+        drawFishLayer();
+        fishDone = true;
+      }
+      drawPlant(p, simT);
+    }
+    if (!fishDone) { drawFoods(false); drawFishLayer(); }
+    drawBubbleSet(bubbles.filter(b => b.once), simT, true);
     drawSurface();
     drawNest();
     drawFoods(true);
     drawRipples(dt);
+    drawVignette();
 
     requestAnimationFrame(frame);
   }
