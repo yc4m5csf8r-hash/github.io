@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>アクアリウム - 実写</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+  video, canvas {
+    position: fixed; inset: 0; width: 100%; height: 100%; display: block;
+  }
+  video { object-fit: cover; opacity: 0; transition: none; }
+  body.fit video { object-fit: contain; }
+  canvas { pointer-events: none; z-index: 5; }
+  #catch { position: fixed; inset: 0; cursor: pointer; touch-action: none; z-index: 6; }
+
+  #hint {
+    position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%);
+    color: #fff; font: 14px/1.5 sans-serif; background: rgba(0, 0, 0, .45);
+    padding: 6px 14px; border-radius: 20px; pointer-events: none; user-select: none;
+    text-align: center; transition: opacity 1.5s; width: max-content; max-width: calc(100vw - 64px);
+    opacity: 0; z-index: 7;
+  }
+
+  #setup {
+    position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
+    background: radial-gradient(ellipse at 50% 30%, #1b5f8f, #04203a 70%);
+    color: #eaf6ff; font: 15px/1.7 sans-serif; padding: 16px; box-sizing: border-box; z-index: 10;
+  }
+  #setup.show { display: flex; }
+  #setup .box {
+    max-width: 560px; width: 100%; background: rgba(0, 20, 40, .55);
+    border: 2px dashed rgba(170, 220, 255, .5); border-radius: 16px; padding: 24px; box-sizing: border-box;
+  }
+  #setup.drag .box { border-color: #fff; background: rgba(40, 110, 170, .55); }
+  #setup h1 { font-size: 20px; margin: 0 0 12px; }
+  #setup ol { padding-left: 1.4em; margin: 8px 0 16px; }
+  #setup code { background: rgba(255, 255, 255, .12); padding: 1px 6px; border-radius: 4px; }
+  #setup button {
+    font: inherit; font-size: 16px; color: #04203a; background: #bfe6ff; border: 0;
+    border-radius: 10px; padding: 10px 20px; cursor: pointer;
+  }
+  #setup button:hover { background: #fff; }
+  #setup .small { font-size: 13px; opacity: .8; margin-top: 14px; }
+  #msg { color: #ffd38a; min-height: 1.7em; }
+</style>
+</head>
+<body>
+<video id="va" muted playsinline preload="auto"></video>
+<video id="vb" muted playsinline preload="auto"></video>
+<canvas id="fx"></canvas>
+<div id="catch"></div>
+<div id="hint">クリックでエサ ／ F：全画面 ／ M：音 ／ C：表示の切り替え ／ O：動画を変える</div>
+
+<div id="setup">
+  <div class="box">
+    <h1>水槽の動画を入れてください</h1>
+    <div>次のどちらかの方法で入れられます。</div>
+    <ol>
+      <li>動画ファイルをこの画面に<strong>ドラッグ＆ドロップ</strong>する（マウスでつかんで、ここに落とす）</li>
+      <li>下のボタンを押して動画ファイルを選ぶ</li>
+    </ol>
+    <button id="pick">動画ファイルを選ぶ</button>
+    <div id="msg"></div>
+    <div class="small">
+      一度入れた動画はこのブラウザが覚えているので、次からは開くだけで再生されます。<br>
+      または、このファイルと同じフォルダに <code>betta.mp4</code> という名前で動画を置いても再生されます。
+    </div>
+  </div>
+</div>
+<input id="file" type="file" accept="video/*" hidden>
+
+<script>
+(() => {
+  'use strict';
+
+  const va = document.getElementById('va');
+  const vb = document.getElementById('vb');
+  const setup = document.getElementById('setup');
+  const msg = document.getElementById('msg');
+  const fileInput = document.getElementById('file');
+  const hint = document.getElementById('hint');
+
+  // 同じフォルダに置かれていたら自動で読み込むファイル名
+  const DEFAULT_FILES = ['betta.mp4', 'betta.webm', 'betta.mov'];
+  // 終わり際をこの秒数かけて重ねて、ループのつなぎ目を目立たなくする
+  const FADE = 1.2;
+
+  let active = va, standby = vb;
+  let fading = false, fadeStart = 0;
+  let currentUrl = null;
+
+  // ---------------- 動画を覚えておく（ブラウザ内の保存場所 IndexedDB を使う） ----------------
+  function openDB() {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open('aquarium-video', 1);
+      req.onupgradeneeded = () => req.result.createObjectStore('videos');
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  }
+  async function saveVideo(blob) {
+    try {
+      const db = await openDB();
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction('videos', 'readwrite');
+        tx.objectStore('videos').put(blob, 'current');
+        tx.oncomplete = resolve;
+        tx.onerror = () => reject(tx.error);
+      });
+    } catch (e) { /* 保存できない環境でも再生はできる */ }
+  }
+  async function loadSavedVideo() {
+    try {
+      const db = await openDB();
+      return await new Promise(resolve => {
+        const req = db.transaction('videos').objectStore('videos').get('current');
+        req.onsuccess = () => resolve(req.result || null);
+        req.onerror = () => resolve(null);
+      });
+    } catch (e) { return null; }
+  }
+
+  // ---------------- 再生 ----------------
+  function showHint() {
+    hint.style.opacity = '1';
+    clearTimeout(showHint.t);
+    showHint.t = setTimeout(() => { hint.style.opacity = '0'; }, 6000);
+  }
+
+  function tryLoad(src) {
+    return new Promise(resolve => {
+      const ok = () => { cleanup(); resolve(true); };
+      const ng = () => { cleanup(); resolve(false); };
+      const cleanup = () => { va.removeEventListener('loadeddata', ok); va.removeEventListener('error', ng); };
+      va.addEventListener('loadeddata', ok);
+      va.addEventListener('error', ng);
+      va.src = src;
+    });
+  }
+
+  async function start(src) {
+    fading = false;
+    active = va; standby = vb;
+    const ok = await tryLoad(src);
+    if (!ok) return false;
+    vb.src = src;
+    vb.load();
+    va.style.opacity = '1'; va.style.zIndex = '1';
+    vb.style.opacity = '0'; vb.style.zIndex = '0';
+    va.currentTime = 0;
+    try { await va.play(); } catch (e) { /* 自動再生が止められたらクリックで再生 */ }
+    setup.classList.remove('show');
+    showHint();
+    return true;
+  }
+
+  async function useBlob(blob, save) {
+    if (!blob || !(blob.type || '').startsWith('video') && !/\.(mp4|webm|mov|m4v|ogv)$/i.test(blob.name || '')) {
+      msg.textContent = '動画ファイルではないようです。mp4 などの動画を選んでください。';
+      return;
+    }
+    if (currentUrl) URL.revokeObjectURL(currentUrl);
+    currentUrl = URL.createObjectURL(blob);
+    msg.textContent = '読み込み中…';
+    const ok = await start(currentUrl);
+    if (!ok) {
+      msg.textContent = 'この動画はこのブラウザでは再生できないようです。mp4（H.264）形式がいちばん確実です。';
+      setup.classList.add('show');
+      return;
+    }
+    msg.textContent = '';
+    if (save) saveVideo(blob);
+  }
+
+  // 終わり際にもう1本を最初から再生して、ゆっくり入れ替える
+  function loopTick(now) {
+    const d = active.duration;
+    if (d && isFinite(d)) {
+      const fadeLen = Math.min(FADE, d / 4);
+      if (!fading && active.currentTime >= d - fadeLen && !active.paused) {
+        fading = true;
+        fadeStart = now;
+        standby.currentTime = 0;
+        standby.muted = active.muted;
+        standby.style.zIndex = '2';
+        standby.play().catch(() => {});
+      }
+      if (fading) {
+        const p = Math.min(1, (now - fadeStart) / (fadeLen * 1000));
+        standby.style.opacity = String(p);
+        if (p >= 1) {
+          active.pause();
+          active.style.opacity = '0';
+          active.style.zIndex = '0';
+          standby.style.zIndex = '1';
+          [active, standby] = [standby, active];
+          fading = false;
+        }
+      }
+    }
+    // 万一つなぎ損ねて止まったら最初から
+    if (active.ended) { active.currentTime = 0; active.play().catch(() => {}); }
+  }
+
+  // ---------------- エサ（画面の上に重ねて表示） ----------------
+  const cv = document.getElementById('fx');
+  const ctx = cv.getContext('2d');
+  let W = 0, H = 0, DPR = 1;
+  const foods = [], ripples = [];
+  const rand = (a, b) => a + Math.random() * (b - a);
+
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = innerWidth; H = innerHeight;
+    cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR);
+  }
+  addEventListener('resize', resize);
+  resize();
+
+  function dropFood(x, y) {
+    const s = Math.min(W, H) / 800;
+    for (let i = 0; i < 3; i++) {
+      if (foods.length > 30) foods.shift();
+      foods.push({ x: x + rand(-14, 14) * s, y: y + rand(-6, 6) * s, r: rand(2.6, 3.6) * Math.max(0.7, s), vy: rand(18, 30) * s, ph: rand(0, 6.28), life: 7 });
+    }
+    ripples.push({ x, y, t: 0, s });
+  }
+
+  function drawFx(dt, t) {
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    for (let i = ripples.length - 1; i >= 0; i--) {
+      const r = ripples[i];
+      r.t += dt;
+      if (r.t > 0.8) { ripples.splice(i, 1); continue; }
+      ctx.strokeStyle = `rgba(255,255,255,${(1 - r.t / 0.8) * 0.5})`;
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.ellipse(r.x, r.y, (4 + r.t * 45) * r.s, (4 + r.t * 45) * r.s * 0.3, 0, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    for (let i = foods.length - 1; i >= 0; i--) {
+      const f = foods[i];
+      f.life -= dt;
+      if (f.life <= 0 || f.y > H + 10) { foods.splice(i, 1); continue; }
+      f.y += f.vy * dt;
+      f.x += Math.sin(t * 2 + f.ph) * 8 * dt;
+      ctx.globalAlpha = Math.min(1, f.life / 1.5);
+      const g = ctx.createRadialGradient(f.x - f.r * 0.35, f.y - f.r * 0.35, 0, f.x, f.y, f.r);
+      g.addColorStop(0, '#e8a060');
+      g.addColorStop(1, '#7a3c18');
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(f.x, f.y, f.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    loopTick(now);
+    drawFx(dt, now / 1000);
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  // ---------------- 操作 ----------------
+  document.getElementById('catch').addEventListener('pointerdown', e => {
+    // 自動再生が止められていた場合は、最初のクリックで再生を始める
+    if (active.paused && active.src) active.play().catch(() => {});
+    dropFood(e.clientX, e.clientY);
+  });
+
+  function toggleFullscreen() {
+    const d = document, el = d.documentElement;
+    if (!(d.fullscreenElement || d.webkitFullscreenElement)) {
+      const req = el.requestFullscreen || el.webkitRequestFullscreen;
+      if (req) Promise.resolve(req.call(el)).catch(() => {});
+    } else {
+      const exit = d.exitFullscreen || d.webkitExitFullscreen;
+      if (exit) Promise.resolve(exit.call(d)).catch(() => {});
+    }
+  }
+
+  addEventListener('keydown', e => {
+    const k = e.key.toLowerCase();
+    if (e.code === 'KeyF' || k === 'f') toggleFullscreen();
+    else if (e.code === 'KeyM' || k === 'm') {
+      // 音のオン／オフ（ブラウザの決まりで、最初は消音で始まる）
+      const m = !active.muted;
+      va.muted = vb.muted = m;
+      if (!m) active.play().catch(() => {});
+    } else if (e.code === 'KeyC' || k === 'c') {
+      // 画面いっぱい（はみ出しは切る）／動画全体を表示 の切り替え
+      document.body.classList.toggle('fit');
+    } else if (e.code === 'KeyO' || k === 'o') {
+      fileInput.click();
+    }
+  });
+
+  document.getElementById('pick').addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', () => {
+    if (fileInput.files[0]) useBlob(fileInput.files[0], true);
+    fileInput.value = '';
+  });
+
+  // ドラッグ＆ドロップ（いつでも別の動画に差し替えられる）
+  addEventListener('dragover', e => { e.preventDefault(); setup.classList.add('drag'); });
+  addEventListener('dragleave', () => setup.classList.remove('drag'));
+  addEventListener('drop', e => {
+    e.preventDefault();
+    setup.classList.remove('drag');
+    const f = e.dataTransfer.files[0];
+    if (f) useBlob(f, true);
+  });
+
+  // ---------------- 起動 ----------------
+  (async () => {
+    const saved = await loadSavedVideo();
+    if (saved) {
+      currentUrl = URL.createObjectURL(saved);
+      if (await start(currentUrl)) return;
+    }
+    for (const name of DEFAULT_FILES) {
+      if (await start(name)) return;
+    }
+    setup.classList.add('show');
+  })();
+})();
+</script>
+</body>
+</html>
